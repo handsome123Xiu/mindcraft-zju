@@ -1,0 +1,10 @@
+.vscode
+node_modules
+bots/*/
+!bots/*
+keys.json
+.git
+andy.json
+.env
+.env.*
+logs/
