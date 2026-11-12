@@ -35,12 +35,13 @@ export class CourseResponses {
         this.params = params || {};
         this.key = getKey('COURSE_API_KEY');
     }
-    async sendRequest(turns, systemMessage, stop = '***') {
+    async sendRequest(turns, systemMessage, stop = '***', { signal, runId } = {}) {
         const started = Date.now();
-        const record = { timestamp: new Date().toISOString(), model: this.modelName };
+        const record = { timestamp: new Date().toISOString(), model: this.modelName, run_id: runId };
+        const timeout = AbortSignal.timeout(120000);
         try {
             const response = await fetch(this.url, {
-                method: 'POST', redirect: 'error', signal: AbortSignal.timeout(120000),
+                method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${this.key}`,
@@ -65,6 +66,7 @@ export class CourseResponses {
             return answer;
         } catch (error) {
             record.ok = false;
+            signal?.throwIfAborted();
             const reason = error?.name === 'TimeoutError' ? 'request timed out' :
                 record.http_status && record.http_status !== 200 ? `HTTP ${record.http_status}` :
                 'network error or invalid/incomplete response';
