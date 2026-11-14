@@ -51,6 +51,17 @@ function fixture({ blocks = new Map(), origin = [0, 0, 0], script = [], limits =
 // output cannot quietly execute the first action or guess destructive arguments.
 assert.deepEqual(parseAction('{"action":"place_block","args":{"position":[1,2,3],"block":"stone"}}'),
     tool('place_block', { position: [1, 2, 3], block: 'stone' }));
+// 单键信封兜底：函数名作顶层键时解包为标准动作（宽容语义确定的输出）。
+{
+    const unwrapped = parseAction('{"update_plan":{"steps":[{"id":"p1","title":"t","success":"ok","status":"pending"}]}}');
+    assert.equal(unwrapped.action, 'update_plan');
+    assert.equal(unwrapped.steps.length, 1);
+    assert.equal(parseAction('{"end_turn":{}}').action, 'end_turn');
+    // 歧义输出仍拒绝：多键、未知键、数组体、字符串体。
+    for (const bad of ['{"update_plan":{"steps":[]},"extra":1}', '{"unknown_action":{}}',
+        '{"finish":[1,2]}', '{"blocked":"原因"}'])
+        assert.throws(() => parseAction(bad), /action/);
+}
 assert.deepEqual(parseAction('{"action":"tool_call","name":"inspect_build","arguments":{}}'), tool('inspect_build'));
 assert.deepEqual(parseAction('{"action":"dig_block","position":[1,2,3],"expectedBlock":"stone"}'),
     tool('dig_block', { position: [1, 2, 3], expectedBlock: 'stone' }));
@@ -133,7 +144,8 @@ for (const raw of [
     const blocked = await executePlacement(primitive, floating.world, { dimension: 'overworld' });
     assert.equal(blocked.differences[0].reason, 'missing_reference');
     assert.equal(floating.writes.length, 0);
-    assert.throws(() => compilePlacement('place_rectangle', { min: [0, 1, 0], max: [2, 1, 2], block: 'sand' }), /重力材料/);
+    // 重力方块已放开：可编译，风险由运行时提示处理。
+    assert.doesNotThrow(() => compilePlacement('place_rectangle', { min: [0, 1, 0], max: [2, 1, 2], block: 'sand' }));
 }
 
 const removalRegion = { min: [0, 0, 0], max: [2, 0, 0] };

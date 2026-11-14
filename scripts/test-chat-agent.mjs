@@ -179,8 +179,23 @@ function fixture(script, options = {}) {
     const requests = h.calls.length;
     const result = await h.agent.receiveMessage({ ...task, request: '补充内容' });
     assert.equal(result.paused, true);
+    assert.match(result.notice, /继续建造/);
+    assert.match(result.notice, /取消建造/);
     assert.equal(h.calls.length, requests);
     assert.equal(h.files.get('state').messages.at(-1).content, '补充内容');
+    for (let i = 0; i < 45; i++) await h.agent.receiveMessage({ ...task, request: '后续说明 ' + i });
+    await h.agent.receiveMessage({ ...task, owner: 'builder_1', request: '队友建议不是用户约束', peerMessage: true });
+    const saved = h.files.get('state');
+    assert.equal(saved.messages.length, 40);
+    assert(!saved.messages.some(message => message.content === '补充内容'));
+    assert.equal(saved.clarifications[0].content, '补充内容', 'user constraints survive rolling chat history');
+    assert.equal(saved.clarifications.length, 46, 'peer discussion does not become a pinned user requirement');
+    const restored = fixture([({ turns }) => {
+        assert.equal(JSON.parse(turns[0].content).userClarifications[0].content, '补充内容');
+        return stop;
+    }]);
+    restored.agent.restore(saved);
+    await restored.agent.resume();
 }
 
 // Input arriving while the previous result is saving becomes the next turn.

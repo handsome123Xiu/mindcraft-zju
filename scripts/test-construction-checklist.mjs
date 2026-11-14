@@ -41,29 +41,25 @@ for (const value of [
 ]) assert.throws(() => parseAction(JSON.stringify(value)));
 assert.throws(() => parseAction(JSON.stringify(place) + '\n' + JSON.stringify(place)));
 
-// Registry policy opens non-cubes and removes every known gravity material.
+// Registry policy opens non-cubes; gravity and special blocks are allowed with notes.
 {
     const registry = minecraftData('1.21.6');
     const names = materialNames(registry);
     assert(names.length > 900);
-    for (const name of ['oak_stairs', 'oak_slab', 'oak_log', 'oak_door', 'red_bed', 'torch', 'lantern', 'chest', 'tnt', 'bedrock']) {
+    for (const name of ['oak_stairs', 'oak_slab', 'oak_log', 'oak_door', 'red_bed', 'torch', 'lantern', 'chest', 'tnt', 'bedrock', 'sand', 'cake']) {
         assert(names.includes(name), name);
         assert.doesNotThrow(() => compileBlueprint({ shapes: [{ kind: 'point', at: [0, 0, 0], block: name }] }, origin));
     }
-    for (const name of GRAVITY_MATERIALS) {
-        assert(!names.includes(name), name);
-        assert.throws(() => compileBlueprint({ shapes: [{ kind: 'point', at: [0, 0, 0], block: name }] }, origin), /重力材料/);
-        assert.throws(() => compilePlacement('place_block', { position: origin, block: name }), /重力材料/);
-    }
+    assert(!MATERIALS.includes('water'), 'fluid/internal states without inventory items are not standalone materials');
     const f = fixture([{ kind: 'point', at: [0, 0, 0], block: 'stone' }]);
+    // 重力/特殊方块不再被程序拒绝：可放置，风险走 placementNotes。
+    assert.doesNotThrow(() => compilePlacement('place_block', { position: origin, block: 'sand' }));
+    const cakeInfo = await f.tools.call('list_materials', { query: 'cake', limit: 1 });
+    assert(cakeInfo.notes?.cake?.length, 'cake 应带特殊放置提示');
     const matches = await f.tools.call('list_materials', { query: 'stairs', limit: 2 });
     assert.equal(matches.materials.length, 2);
     assert(matches.materials.every(item => item.name.endsWith('_stairs')));
     assert.equal(matches.nextOffset, 2);
-    assert(!MATERIALS.includes('water'), 'fluid/internal states without inventory items are not standalone materials');
-    await assert.rejects(executePlacement({ name: 'place_block', region: { min: origin, max: origin },
-        cells: [{ pos: origin, block: 'sand' }] }, f.world), /重力材料/);
-    assert.equal(f.writes.length, 0);
 }
 
 const base = [
@@ -116,8 +112,15 @@ const base = [
     const clearance = await frame.tools.call('inspect_part', { partId: 'clearance' });
     assert.equal(clearance.status, 'blocked');
     assert.equal(clearance.remaining, 1);
-    assert.equal(clearance.suggestions.actions.length, 0, 'clearance never suggests filling air');
+    // An occupied clearance cell now yields a dig suggestion with the observed block.
+    const dig = clearance.suggestions.actions;
+    assert.equal(dig.length, 1);
+    assert.equal(dig[0].name, 'dig_block');
+    assert.equal(dig[0].args.expectedBlock, 'stone');
     assert.equal(frame.tools.inspect().status, 'blocked');
+    frame.blocks.set(origin.join(','), 'air');
+    assert.equal((await frame.tools.call('inspect_part', { partId: 'clearance' })).suggestions.actions.length, 0);
+    assert.equal(frame.tools.inspect().status, 'completed');
 }
 
 // Replacement and openings produce a single, non-overlapping final ownership

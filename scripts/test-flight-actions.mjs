@@ -240,7 +240,11 @@ function fixture(options = {}) {
     const world = createMineflayerWorld(f.bot, { flightOptions: { wait: f.wait } });
     assert.equal(await world.place({ pos: [2, 0, 0], block: 'oak_door' }), 'multiblock_blueprint_required');
     assert.equal(writes, 0);
-    await assert.rejects(world.place({ pos: [2, 0, 0], block: 'sand' }), /重力材料/);
+    await assert.rejects(world.place({ pos: [2, 0, 0], block: 'oak_door', expectedAt: () => 'oak_door',
+        authorize(positions) { assert.deepEqual(positions, [[2, 0, 0], [2, 1, 0]]); throw new Error('lease revoked'); } }), /lease revoked/);
+    assert.equal(writes, 0, 'revocation blocks physical placement including the extra cell');
+    // 重力方块已放开：不再被断言拒绝；仍要求注册表内存在的物品。
+    await assert.rejects(world.place({ pos: [2, 0, 0], block: 'no_such_block_ever' }), /没有可用的方块物品/);
     const job = { origin: [0, 0, 0], dimension: 'overworld', placed: {}, removed: {}, placementAttempts: 0,
         assignmentVersion: 1, assignment: { version: 1, dimension: 'overworld', blueprint: compileBlueprint({
             shapes: [{ kind: 'box', part: '门', min: [2, 0, 0], max: [2, 1, 0], block: 'oak_door' }]
@@ -300,7 +304,7 @@ function fixture(options = {}) {
     world.setWorksite({ origin: [0, 0, 0], dimension: 'overworld' });
     assert(world.supportedMaterials().includes('pink_terracotta'));
     assert(world.supportedMaterials().includes('oak_stairs'));
-    assert(!world.supportedMaterials().includes('sand'));
+    assert(world.supportedMaterials().includes('sand'), '重力方块已放开：目录包含 sand');
     assert.equal(await world.digBlock([0, 12, 0], 'stone'), 'removed');
     assert.equal(digs(), 1);
     assert(world.snapshot().flying);

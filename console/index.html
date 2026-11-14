@@ -57,6 +57,7 @@
   <button data-tab="settings">设置</button>
   <button data-tab="profilesTab">Profiles</button>
   <button data-tab="catalogTab">动作 / 工具 / Skills</button>
+  <button data-tab="teamTab">团队协作</button>
 </nav>
 <main>
   <section id="control" class="active">
@@ -71,7 +72,7 @@
         <button class="primary" id="startBtn">启动</button>
         <button class="primary danger" id="stopBtn" disabled>停止</button>
       </p>
-      <p class="muted">启动即运行 main.js 子进程；日志实时显示在下方。端口留空则使用 settings 里的配置或自动扫描。</p>
+      <p class="muted">启动即运行 main.js 子进程；日志实时显示在下方。端口留空则使用 settings 中的配置；单人世界请填写“对局域网开放”时显示的端口。</p>
     </div>
     <div class="card">
       <h2>实时日志</h2>
@@ -107,9 +108,93 @@
         <div><label>选择文件</label><select id="profileFile"></select></div>
         <div style="flex:0; display:flex; align-items:flex-end"><button class="primary" id="saveProfile">保存</button></div>
       </div>
-      <label>profile JSON（model.api 目前仅支持 course_responses）</label>
+      <label>profile JSON（model.api 支持 course_responses / deepseek_responses）</label>
       <textarea id="profileEditor" rows="18" spellcheck="false"></textarea>
     </div>
+  </section>
+
+  <section id="teamTab">
+    <div class="card">
+      <h2>团队画布</h2>
+      <div class="row" style="align-items:center; flex-wrap:wrap; margin-bottom:12px">
+        <div style="flex:0 0 auto"><button class="primary" id="loadCentralizedExample">载入中心化示例</button></div>
+        <div class="muted">中心 agent 负责蓝图、动态分工和最终验收；施工成员可分模块建造，也可协商共同完成一个模块。示例含 2 名 builder，成员数量和连线均可编辑。</div>
+      </div>
+      <div class="row" style="align-items:flex-end">
+        <div><label>新成员名</label><input id="newAgentName" placeholder="beta"></div>
+        <div style="flex:0"><button class="primary" id="addAgentBtn">添加成员</button></div>
+        <div><label>施工分工</label><select id="teamAssignment"><option value="lead-assigns">由 leader 自主分工</option><option value="first-claim">保留认领配置</option></select></div>
+        <div style="flex:2"><label>预设模板（按画布现有成员生成）</label>
+          <div style="display:flex; gap:8px">
+            <button class="primary" data-preset="centralized">中心化</button>
+            <button class="primary" data-preset="peers">开放通信</button>
+          </div>
+        </div>
+      </div>
+      <p><button class="primary" id="startTeam">保存并开始新测试</button> <button id="resumeTeam">恢复旧工程</button> <button id="stopTeam" disabled>停止团队</button>
+        <span id="teamStatus" class="muted">使用“控制”页的 LAN 端口；未单独配置 profile 的成员使用默认 profile。</span></p>
+      <p class="muted">新测试结束旧工程并释放任务，保留日志和现场建筑，可使用新的成员与连线。恢复旧工程需保持原结构。</p>
+      <div id="canvasWrap" style="position:relative; margin-top:12px; border:1px solid #2a2f37; border-radius:8px; background:#0d0f12; height:440px; overflow:hidden">
+        <svg id="teamCanvas" width="100%" height="100%">
+          <defs>
+            <marker id="arrow-delegate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f9cf9"/></marker>
+            <marker id="arrow-report" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2ecc71"/></marker>
+            <marker id="arrow-message" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8b939e"/></marker>
+          </defs>
+        </svg>
+        <div id="canvasLegend" style="position:absolute; top:8px; left:12px; display:flex; gap:12px; font-size:11px; color:#8b939e; pointer-events:none">
+          <span>⬤ lead</span><span style="color:#8b939e">⬤ builder</span><span style="color:#2ecc71">⬤ inspector</span>
+          <span style="color:#4f9cf9">— delegate 派单</span>
+          <span style="color:#2ecc71">— report 上报</span>
+          <span>— message 私聊</span>
+        </div>
+        <div id="canvasHint" class="muted" style="position:absolute; left:12px; bottom:8px; pointer-events:none">
+          拖动头像移动 · 从节点外环拖出连线 · 点击节点/连线编辑 · 双击空白添加成员 · Delete 删除 · Ctrl+S 保存
+        </div>
+        <div id="emptyState" style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:#5b636d">
+          <div style="font-size:15px">画布还是空的</div>
+          <div style="font-size:13px">点击上方“载入中心化示例”快速开始，也可添加成员或双击画布</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div><label>选中成员角色</label>
+          <select id="roleSelect">
+            <option value="lead">lead（蓝图权威 + 全局验收）</option>
+            <option value="builder">builder（施工，禁设计）</option>
+            <option value="inspector">inspector（只读巡检）</option>
+          </select>
+        </div>
+        <div><label>选中连线类型</label>
+          <select id="edgeTypeSelect">
+            <option value="delegate">delegate（派单，蓝）</option>
+            <option value="report">report（完工上报，绿）</option>
+            <option value="message">message（私聊，灰）</option>
+          </select>
+        </div>
+        <div style="flex:0; display:flex; align-items:flex-end; gap:8px">
+          <button class="primary" id="applyCanvas">校验并保存<span id="dirtyDot" style="display:none; margin-left:6px; width:8px; height:8px; border-radius:50%; background:#f0b429; vertical-align:middle"></span></button>
+          <button id="toggleJson">JSON</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div><label>选中成员 Profile 路径（空白继承默认）</label><input id="nodeProfile" placeholder="andy.json 或 profiles/xxx.json"></div>
+        <div><label>团队入口（负责规划和派单，需为 lead）</label><select id="teamEntry"></select></div>
+      </div>
+      <label>选中成员的职责说明</label><textarea id="nodeInstructions" rows="2" maxlength="2000" placeholder="例如：优先处理地基和墙体，遇到阻碍报告具体坐标。"></textarea>
+      <p class="muted">委托线决定可派单对象，结果自动返回；消息线为单向通信；上报线订阅任务结果。任务依赖由协调者运行时设置。保存修改对下次启动生效，当前工程固定使用启动时的结构。</p>
+      <p class="muted">当前执行模式：协调者派单 → 成员部件验收 → 依赖任务解锁 → 协调者整体验收。独立验收节点和成员再次委托将在后续版本支持。</p>
+      <p id="canvasValidation" class="muted" style="margin:8px 0 0"></p>
+      <div id="jsonBlock" style="display:none; margin-top:10px">
+        <label>team.json（高级编辑，与画布同步）</label>
+        <textarea id="teamEditor" rows="12" spellcheck="false"></textarea>
+      </div>
+    </div>
+    <div class="card">
+      <h2>当前施工租约</h2>
+      <table id="claimsTable"><thead><tr><th>部件</th><th>持有者</th><th>过期时间</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card"><h2>团队任务</h2><table id="teamTasks"><thead><tr><th>任务</th><th>执行者</th><th>模块与自行施工范围</th><th>依赖 / 协作来源</th><th>状态</th><th>结果</th></tr></thead><tbody></tbody></table></div>
+    <div class="card"><h2>协作提案</h2><table id="teamProposals"><thead><tr><th>发起者 → 接收者</th><th>工作与范围</th><th>状态</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section id="catalogTab">
@@ -137,6 +222,9 @@ const toast = text => { const el = $('#toast'); el.textContent = text; el.style.
 const api = async (path, options) => {
   const response = await fetch(path, options && { headers: { 'content-type': 'application/json' }, ...options });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 404 && (path === '/api/team' || path.startsWith('/api/team/'))) {
+    throw new Error('当前控制台未提供团队接口，请重启控制台（npm run console）后刷新页面。');
+  }
   if (!response.ok) throw new Error(body.error ?? response.statusText);
   return body;
 };
@@ -149,9 +237,9 @@ $$('nav button').forEach(button => button.onclick = () => {
 
 // 状态轮询
 async function refreshStatus() {
-  const { running, pid } = await api('/api/status');
+  const { running, pid, team } = await api('/api/status');
   $('#dot').classList.toggle('on', running);
-  $('#pidText').textContent = running ? `运行中 pid=${pid}` : '未运行';
+  $('#pidText').textContent = team ? '团队运行中' : running ? `运行中 pid=${pid}` : '未运行';
   $('#startBtn').disabled = running;
   $('#stopBtn').disabled = !running;
 }
@@ -191,6 +279,7 @@ $('#stopBtn').onclick = async () => { await api('/api/agent/stop', { method: 'PO
 // 设置页
 async function loadSettings() {
   const settings = await api('/api/settings');
+  if (!$('#mcPort').value && Number(settings.port) > 0) $('#mcPort').value = settings.port;
   $$('[data-setting]').forEach(input => {
     const key = input.dataset.setting;
     const value = settings[key];
@@ -272,7 +361,423 @@ async function loadCatalog() {
     `<tr><td class="name">${s.name}</td><td class="desc">${s.description}</td></tr>`).join('');
   $('#catalogCount').textContent = `${actions.length} actions · ${tools.length} tools · ${skills.length} skills`;
 }
+// 团队页：SVG 画布编辑器
+const EDGE_COLORS = { delegate: '#4f9cf9', report: '#2ecc71', message: '#8b939e' };
+const svg = $('#teamCanvas');
+let graph = { agents: {}, edges: [], rules: undefined };  // agents: name -> {role, x, y}
+let selected = null;                          // {type:'agent', name} | {type:'edge', index}
+let linkDraft = null;                         // 正在拖出的连线 {from, x, y}
+let hoverName = null;                         // 悬停的节点（连线时作为目标高亮）
+let dirty = false;                            // 画布有未保存修改时，轮询不回写
+let runtimeAgents = {};
+
+const nodeRadius = 26;
+const agentNames = () => Object.keys(graph.agents);
+
+function markDirty() {
+  dirty = true;
+  $('#dirtyDot').style.display = 'inline-block';
+  $('#canvasValidation').textContent = '画布有未保存修改——点“校验并保存”或 Ctrl+S';
+}
+function markClean(message) {
+  dirty = false;
+  $('#dirtyDot').style.display = 'none';
+  if (message) $('#canvasValidation').textContent = message;
+}
+
+function render() {
+  const ns = 'http://www.w3.org/2000/svg';
+  const defs = svg.querySelector('defs');
+  svg.innerHTML = '';
+  svg.append(defs);  // marker 定义保留，innerHTML 清空后重新挂回
+  $('#emptyState').style.display = agentNames().length ? 'none' : 'flex';
+  const line = (x1, y1, x2, y2, stroke, width, dash) => {
+    const el = document.createElementNS(ns, 'line');
+    for (const [k, v] of Object.entries({ x1, y1, x2, y2, stroke, 'stroke-width': width })) el.setAttribute(k, v);
+    if (dash) el.setAttribute('stroke-dasharray', dash);
+    return el;
+  };
+  const edgeTrim = (from, to) => {   // 边从节点边缘出发而非圆心，避免箭头被头像盖住
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x1: from.x + dx / len * (nodeRadius + 7), y1: from.y + dy / len * (nodeRadius + 7),
+             x2: to.x - dx / len * (nodeRadius + 9), y2: to.y - dy / len * (nodeRadius + 9) };
+  };
+  for (const [index, edge] of graph.edges.entries()) {
+    const from = graph.agents[edge.from], to = graph.agents[edge.to];
+    if (!from || !to) continue;
+    const stroke = EDGE_COLORS[edge.type] ?? '#8b939e';
+    const active = selected?.type === 'edge' && selected.index === index;
+    const path = edgeTrim(from, to);
+    // Separate parallel and return edges so delegation and reporting are both
+    // visible and individually selectable in the centralized example.
+    const siblings = graph.edges.filter(e => (e.from === edge.from && e.to === edge.to) || (e.from === edge.to && e.to === edge.from));
+    const lane = siblings.indexOf(edge) - (siblings.length - 1) / 2;
+    const direction = edge.from < edge.to ? 1 : -1;
+    const length = Math.hypot(to.x - from.x, to.y - from.y) || 1;
+    const cx = (from.x + to.x) / 2 - (to.y - from.y) / length * direction * lane * 72;
+    const cy = (from.y + to.y) / 2 + (to.x - from.x) / length * direction * lane * 72;
+    const curve = `M ${path.x1} ${path.y1} Q ${cx} ${cy} ${path.x2} ${path.y2}`;
+    const visual = document.createElementNS(ns, 'path');
+    for (const [key, value] of Object.entries({ d: curve, fill: 'none', stroke, 'stroke-width': active ? 3.5 : 2 })) visual.setAttribute(key, value);
+    visual.setAttribute('marker-end', `url(#arrow-${edge.type})`);
+    svg.append(visual);
+    const mid = document.createElementNS(ns, 'text');
+    mid.setAttribute('x', (path.x1 + 2 * cx + path.x2) / 4); mid.setAttribute('y', (path.y1 + 2 * cy + path.y2) / 4 - 6);
+    mid.setAttribute('fill', stroke); mid.setAttribute('font-size', 11); mid.setAttribute('text-anchor', 'middle');
+    mid.textContent = { delegate: '派单', report: '结果上报', message: '消息' }[edge.type] ?? edge.type;
+    mid.style.pointerEvents = 'none';
+    svg.append(mid);
+    const hit = document.createElementNS(ns, 'path');
+    for (const [key, value] of Object.entries({ d: curve, fill: 'none', stroke: 'transparent', 'stroke-width': 16 })) hit.setAttribute(key, value);
+    hit.style.cursor = 'pointer';
+    hit.onclick = () => select({ type: 'edge', index });
+    svg.append(hit);
+  }
+  if (linkDraft) {
+    const draft = line(graph.agents[linkDraft.from].x, graph.agents[linkDraft.from].y, linkDraft.x, linkDraft.y, '#f0b429', 2, '5 4');
+    svg.append(draft);
+    // 连线悬停目标高亮：把候选节点画出脉冲圈
+    const hoverNode = hoverName && hoverName !== linkDraft.from ? graph.agents[hoverName] : null;
+    if (hoverNode) {
+      const pulse = document.createElementNS(ns, 'circle');
+      pulse.setAttribute('cx', hoverNode.x); pulse.setAttribute('cy', hoverNode.y);
+      pulse.setAttribute('r', nodeRadius + 10); pulse.setAttribute('fill', 'none');
+      pulse.setAttribute('stroke', '#f0b429'); pulse.setAttribute('stroke-width', 2);
+      pulse.setAttribute('stroke-dasharray', '4 3');
+      svg.append(pulse);
+    }
+  }
+  for (const [name, agent] of Object.entries(graph.agents)) {
+    const group = document.createElementNS(ns, 'g');
+    group.style.cursor = 'grab';
+    const active = selected?.type === 'agent' && selected.name === name;
+    const roleColor = agent.role === 'lead' ? '#4f9cf9' : agent.role === 'inspector' ? '#2ecc71' : '#8b939e';
+    const ring = document.createElementNS(ns, 'circle');
+    ring.setAttribute('cx', agent.x); ring.setAttribute('cy', agent.y); ring.setAttribute('r', nodeRadius + 5);
+    ring.setAttribute('fill', 'none');
+    ring.setAttribute('stroke', active ? '#f0b429' : hoverName === name && linkDraft ? '#f0b429' : roleColor);
+    ring.setAttribute('stroke-width', active ? 3 : 1.5);
+    if (!linkDraft) ring.setAttribute('stroke-dasharray', '3 3');   // 虚线环=可拖出连线
+    ring.style.cursor = 'crosshair';
+    const head = document.createElementNS(ns, 'circle');
+    head.setAttribute('cx', agent.x); head.setAttribute('cy', agent.y); head.setAttribute('r', nodeRadius);
+    head.setAttribute('fill', agent.role === 'lead' ? '#1f3a5f' : agent.role === 'inspector' ? '#1f4d33' : '#21262e');
+    head.setAttribute('stroke', active ? '#f0b429' : roleColor);
+    head.setAttribute('stroke-width', active ? 2.5 : 1);
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', agent.x); label.setAttribute('y', agent.y - 2);
+    label.setAttribute('fill', '#e4e7eb'); label.setAttribute('font-size', 12); label.setAttribute('text-anchor', 'middle');
+    label.textContent = name.slice(0, 10);
+    const role = document.createElementNS(ns, 'text');
+    role.setAttribute('x', agent.x); role.setAttribute('y', agent.y + 13);
+    role.setAttribute('fill', roleColor); role.setAttribute('font-size', 10); role.setAttribute('text-anchor', 'middle');
+    role.textContent = runtimeAgents[name]?.status ?? agent.role ?? 'builder';
+    group.append(ring, head, label, role);
+    const responsibility = document.createElementNS(ns, 'text');
+    responsibility.setAttribute('x', agent.x); responsibility.setAttribute('y', agent.y + nodeRadius + 23);
+    responsibility.setAttribute('fill', '#9aa3ad'); responsibility.setAttribute('font-size', 11); responsibility.setAttribute('text-anchor', 'middle');
+    responsibility.textContent = { lead: '蓝图 · 监督 · 最终验收', builder: '建筑施工', inspector: '只读巡检' }[agent.role] ?? '';
+    const title = document.createElementNS(ns, 'title');
+    title.textContent = agent.instructions || responsibility.textContent;
+    group.append(responsibility, title);
+    group.onmouseenter = () => { hoverName = name; if (linkDraft) render(); };
+    group.onmouseleave = () => { if (hoverName === name) { hoverName = null; if (linkDraft) render(); } };
+    group.onmousedown = event => {
+      if (event.target === ring) startLink(name, event);
+      else startDrag(name, event);
+      select({ type: 'agent', name });
+    };
+    svg.append(group);
+  }
+}
+
+let drag = null;
+function startDrag(name, event) {
+  const agent = graph.agents[name];
+  const rect = svg.getBoundingClientRect();
+  drag = { name, offsetX: event.clientX - rect.left - agent.x, offsetY: event.clientY - rect.top - agent.y };
+  event.preventDefault();
+}
+function startLink(name, event) { linkDraft = { from: name, x: 0, y: 0 }; updateLink(event); event.preventDefault(); }
+function updateLink(event) {
+  if (!linkDraft) return;
+  const rect = svg.getBoundingClientRect();
+  linkDraft.x = event.clientX - rect.left; linkDraft.y = event.clientY - rect.top;
+  render();
+}
+svg.onmousemove = event => {
+  if (drag) {
+    dragMoved = true;
+    const rect = svg.getBoundingClientRect();
+    graph.agents[drag.name].x = Math.max(nodeRadius, Math.min(rect.width - nodeRadius, event.clientX - rect.left - drag.offsetX));
+    graph.agents[drag.name].y = Math.max(nodeRadius, Math.min(rect.height - nodeRadius, event.clientY - rect.top - drag.offsetY));
+    render();
+  } else if (linkDraft) updateLink(event);
+};
+let dragMoved = false;
+svg.onmouseup = event => {
+  if (!linkDraft) {
+    if (drag && dragMoved) markDirty();
+    drag = null; dragMoved = false;
+    return;
+  }
+  const rect = svg.getBoundingClientRect();
+  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+  const hit = agentNames().find(name => Math.hypot(graph.agents[name].x - x, graph.agents[name].y - y) <= nodeRadius + 5);
+  if (hit && hit !== linkDraft.from) {
+    const duplicate = graph.edges.some(e =>
+      (e.from === linkDraft.from && e.to === hit) || (e.from === hit && e.to === linkDraft.from));
+    if (duplicate) toast('两个成员之间已有一条连线，点击连线可改类型');
+    else {
+      graph.edges.push({ from: linkDraft.from, to: hit, type: 'message' });
+      select({ type: 'edge', index: graph.edges.length - 1 });
+      markDirty();
+      syncToEditor();
+    }
+  }
+  linkDraft = null; drag = null; dragMoved = false;
+  render();
+};
+svg.onmousedown = event => {
+  if (event.target === svg) select(null);   // 点空白取消选中
+};
+svg.ondblclick = event => {
+  if (event.target !== svg) return;          // 双击空白：就地添加成员
+  const rect = svg.getBoundingClientRect();
+  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+  const base = 'agent';
+  let name = base, n = agentNames().length + 1;
+  while (graph.agents[name]) name = base + '_' + (n++);
+  graph.agents[name] = { role: 'builder', x, y };
+  select({ type: 'agent', name });
+  syncToEditor();
+  markDirty();
+  toast('已添加 ' + name + '，在左侧输入框改名请先删掉再添加');
+};
+
+function select(item) {
+  selected = item;
+  if (item?.type === 'agent') $('#roleSelect').value = graph.agents[item.name].role ?? 'builder';
+  $('#nodeProfile').disabled = $('#nodeInstructions').disabled = item?.type !== 'agent';
+  $('#nodeProfile').value = item?.type === 'agent' ? graph.agents[item.name].profile ?? '' : '';
+  $('#nodeInstructions').value = item?.type === 'agent' ? graph.agents[item.name].instructions ?? '' : '';
+  if (item?.type === 'edge') $('#edgeTypeSelect').value = graph.edges[item.index]?.type ?? 'message';
+  render();
+}
+$('#roleSelect').onchange = () => {
+  if (selected?.type === 'agent') {
+    graph.agents[selected.name].role = $('#roleSelect').value;
+    render(); syncToEditor(); markDirty();
+  }
+};
+for (const [id, key] of [['nodeProfile', 'profile'], ['nodeInstructions', 'instructions']]) {
+  $('#' + id).onchange = () => {
+    if (selected?.type !== 'agent') return;
+    graph.agents[selected.name][key] = $('#' + id).value.trim();
+    syncToEditor(); markDirty();
+  };
+}
+$('#teamEntry').onchange = () => { graph.entryAgent = $('#teamEntry').value; syncToEditor(); markDirty(); };
+$('#teamAssignment').onchange = () => { graph.rules = { ...defaultRules(), ...graph.rules, assignment: $('#teamAssignment').value }; syncToEditor(); markDirty(); };
+$('#edgeTypeSelect').onchange = () => {
+  if (selected?.type === 'edge') {
+    graph.edges[selected.index].type = $('#edgeTypeSelect').value;
+    render(); syncToEditor(); markDirty();
+  }
+};
+const defaultRules = () => ({ assignment: 'lead-assigns', handoff: 'on-part-verified', finish: 'lead-gates' });
+document.addEventListener('keydown', event => {
+  if (event.key === 'Delete' || (event.ctrlKey && event.key.toLowerCase() === 's')) {
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+    if (event.ctrlKey) { event.preventDefault(); if (agentNames().length) $('#applyCanvas').click(); return; }
+    if (!selected) return;
+    if (selected.type === 'agent') {
+      delete graph.agents[selected.name];
+      graph.edges = graph.edges.filter(e => e.from !== selected.name && e.to !== selected.name);
+    } else graph.edges.splice(selected.index, 1);
+    selected = null; render(); syncToEditor(); markDirty();
+  }
+});
+$('#addAgentBtn').onclick = () => {
+  const name = $('#newAgentName').value.trim();
+  if (!/^[a-zA-Z0-9_]{1,16}$/.test(name) || graph.agents[name]) return toast('名字需为 1–16 位字母数字下划线且不重复');
+  const rect = svg.getBoundingClientRect();
+  graph.agents[name] = { role: 'builder', x: 60 + Math.random() * (rect.width - 120), y: 50 + Math.random() * (rect.height - 100) };
+  select({ type: 'agent', name });
+  syncToEditor();
+  markDirty();
+  $('#newAgentName').value = '';
+  $('#newAgentName').focus();
+};
+
+// 画布 ↔ JSON ↔ spec 双向同步
+function graphToSpec() {
+  return {
+    agents: Object.fromEntries(Object.entries(graph.agents).map(([name, a]) => [name, { role: a.role ?? 'builder',
+      ...(a.profile ? { profile: a.profile } : {}), ...(a.instructions ? { instructions: a.instructions } : {}), position: { x: a.x, y: a.y } }])),
+    ...(graph.entryAgent && graph.agents[graph.entryAgent] ? { entryAgent: graph.entryAgent } : {}),
+    edges: graph.edges.map(({ from, to, type }) => ({ from, to, type })),
+    rules: { ...defaultRules(), ...graph.rules }
+  };
+}
+function specToGraph(spec) {
+  if (!spec?.agents) return;
+  const rect = svg.getBoundingClientRect();
+  const names = Object.keys(spec.agents);
+  const perRow = Math.ceil(Math.sqrt(names.length));
+  graph = { entryAgent: spec.entryAgent, rules: spec.rules, edges: [...(spec.edges ?? [])],
+    agents: Object.fromEntries(names.map((name, i) => [name, {
+      profile: spec.agents[name].profile, instructions: spec.agents[name].instructions,
+      role: spec.agents[name].role ?? 'builder',
+      x: spec.agents[name].position?.x ?? (rect.width || 800) / 2 + (i % perRow - (perRow - 1) / 2) * 130,
+      y: spec.agents[name].position?.y ?? (rect.height || 440) / 2 + (Math.floor(i / perRow) - (perRow / 2 - 0.5)) * 110
+    }])) };
+  if (graph.rules?.assignment === 'spatial-parallel') graph.rules = { ...graph.rules, assignment: 'lead-assigns' };
+  selected = null;
+  $('#teamAssignment').value = graph.rules?.assignment ?? 'lead-assigns';
+  render();
+}
+function syncToEditor() {
+  $('#teamEditor').value = JSON.stringify(graphToSpec(), null, 2);
+  $('#teamAssignment').value = graph.rules?.assignment ?? 'lead-assigns';
+  const names = agentNames();
+  $('#teamEntry').replaceChildren(...names.map(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; return option; }));
+  $('#teamEntry').value = graph.entryAgent ?? names.find(name => graph.agents[name].role === 'lead') ?? names[0] ?? '';
+}
+$('#teamEditor').onblur = () => {
+  try { specToGraph(JSON.parse($('#teamEditor').value)); markDirty(); }
+  catch { toast('JSON 无效，画布保持原状'); }
+};
+$('#toggleJson').onclick = () => {
+  const block = $('#jsonBlock');
+  block.style.display = block.style.display === 'none' ? 'block' : 'none';
+};
+$('#loadCentralizedExample').onclick = () => {
+  const rect = svg.getBoundingClientRect();
+  const width = rect.width || 800, height = rect.height || 440;
+  const spec = {
+    entryAgent: 'lead',
+    agents: {
+      lead: {
+        role: 'lead', position: { x: width / 2, y: height * 0.23 },
+        instructions: '你是团队中心，对整体目标和最终结果负责。观察场地、设计共享蓝图，根据实际支撑、通行、工作量、成员位置和进展自主分工：可以派不同模块，也可以给同一模块划定互不重叠的 scope 范围让成员一起建。不预设左右分区或必须同时开工；独立任务先全部派出，只有真实依赖才等待。允许 builder 交流并通过协作提案交接自己的局部工作。监督进度、调整阻塞任务，最后验收全部蓝图及空位并汇报。空间切分工具仅在适合时选用。'
+      },
+      builder_1: {
+        role: 'builder', position: { x: width * 0.28, y: height * 0.70 },
+        instructions: '你是施工成员，按共享蓝图和任务 scope 施工；同一模块可有其他成员参与。根据现场选择顺序，与队友交流支撑、分工、让路和协助。需要分担时 propose_task_share 提出自己的局部范围，队友 respond_task_share 接受后，由你在动作之间 commit_task_share 正式交接。只有收到运行时任务才开工。交接后原目标仍由你负责，等待协作者完成并验收完整原任务后 complete_task。遇到阻塞向 lead 报告，不能擅改蓝图。requirements 保持原文，进度写入步骤 evidence。'
+      },
+      builder_2: {
+        role: 'builder', position: { x: width * 0.72, y: height * 0.70 },
+        instructions: '你是施工成员，按共享蓝图和任务 scope 施工；同一模块可有其他成员参与。根据现场选择顺序，与队友交流支撑、分工、让路和协助。需要分担时 propose_task_share 提出自己的局部范围，队友 respond_task_share 接受后，由发起者在动作之间 commit_task_share 正式交接。空闲时可以回应提案或让路，接受提案后 end_turn，等待正式任务再施工。验收自己的任务并移到不挡路的位置后 complete_task。遇到阻塞向 lead 报告；不擅改蓝图或 requirements，进度写入步骤 evidence。'
+      }
+    },
+    edges: [
+      { from: 'lead', to: 'builder_1', type: 'delegate' },
+      { from: 'builder_1', to: 'lead', type: 'report' },
+      { from: 'lead', to: 'builder_2', type: 'delegate' },
+      { from: 'builder_2', to: 'lead', type: 'report' },
+      ...['lead', 'builder_1', 'builder_2'].flatMap(from => ['lead', 'builder_1', 'builder_2']
+        .filter(to => to !== from).map(to => ({ from, to, type: 'message' })))
+    ],
+    rules: defaultRules()
+  };
+  drag = null; linkDraft = null; hoverName = null;
+  specToGraph(spec);
+  syncToEditor();
+  select({ type: 'agent', name: 'lead' });
+  markDirty();
+  toast('中心化示例已载入：1 个中心 agent + 2 个施工 agent，可继续编辑或保存并启动');
+};
+$$('[data-preset]').forEach(button => button.onclick = async () => {
+  const names = agentNames();
+  if (!names.length) return toast('画布上还没有成员');
+  const before = graphToSpec();
+  const spec = { ...before, entryAgent: names[0], agents: Object.fromEntries(names.map((name, i) => [name, { ...before.agents[name], role: i === 0 ? 'lead' : 'builder' }])),
+    edges: button.dataset.preset === 'centralized' ? [
+      ...names.slice(1).flatMap(to => [{ from: names[0], to, type: 'delegate' }, { from: to, to: names[0], type: 'report' }]),
+      ...names.flatMap(from => names.filter(to => to !== from).map(to => ({ from, to, type: 'message' })))
+    ] : [],
+    rules: defaultRules() };
+  specToGraph(spec);
+  syncToEditor();
+  markDirty();
+});
+$('#applyCanvas').onclick = async () => {
+  try {
+    const spec = JSON.parse($('#teamEditor').value);
+    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec }) });
+    graph.rules = spec.rules;
+    markClean('已保存 ✓ 新结构对下次启动团队生效');
+    loadTeam(true);
+  } catch (error) { toast(error.message); }
+};
+
+async function loadTeam(force = false) {
+  try {
+    const { spec, validation, claims } = await api('/api/team');
+    // 编辑中（dirty）不回写画布，避免打断用户；只更新校验文案和租约表。
+    if (spec && !dirty && (force || !$('#teamEditor').value || !agentNames().length)) specToGraph(spec);
+    if (spec && !dirty && document.activeElement !== $('#teamEditor')) syncToEditor();
+    if (!dirty) $('#canvasValidation').textContent = spec
+      ? (validation.ok ? '当前 spec 有效 ✓' : '⚠ 当前 spec 无效：' + validation.errors.join('；'))
+      : '画布为空——添加成员或用预设生成';
+    const rows = Object.values(claims.claims ?? {}).map(c =>
+      `<tr><td class="name">${c.partId}</td><td>${c.owner}</td><td>${new Date(c.expiresAt).toLocaleTimeString()}</td></tr>`);
+    $('#claimsTable tbody').innerHTML = rows.length ? rows.join('') : '<tr><td colspan="3" class="muted">暂无认领</td></tr>';
+  } catch (error) { $('#canvasValidation').textContent = error.message; }
+}
+loadTeam();
+setInterval(loadTeam, 5000);
+async function startTeam(fresh) {
+  try {
+    const spec = JSON.parse($('#teamEditor').value);
+    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec }) });
+    markClean('团队定义已保存');
+    const result = await api('/api/team/start', { method: 'POST', body: JSON.stringify({ fresh, port: Number($('#mcPort').value) || null, profile: $('#profileSelect').value || null }) });
+    toast('团队已启动，向 ' + result.entryAgent + ' 发送任务');
+    await refreshTeamRuntime(); refreshStatus();
+  } catch (error) { toast(error.message); }
+}
+$('#startTeam').onclick = () => startTeam(true);
+$('#resumeTeam').onclick = () => startTeam(false);
+$('#stopTeam').onclick = async () => {
+  try { await api('/api/team/stop', { method: 'POST' }); await refreshTeamRuntime(); refreshStatus(); }
+  catch (error) { toast(error.message); }
+};
+async function refreshTeamRuntime() {
+  try {
+    const state = await api('/api/team/runtime');
+    runtimeAgents = Object.fromEntries(state.agents.map(a => [a.name, a]));
+    $('#startTeam').disabled = state.running; $('#resumeTeam').disabled = state.running; $('#stopTeam').disabled = !state.running;
+    $('#teamStatus').textContent = state.running ? state.agents.map(a => a.name + ': ' + a.status).join(' · ') : '团队未运行；端口使用“控制”页配置。';
+    const describeScope = scope => !scope || scope.kind === 'whole-module' ? '完整模块' :
+      scope.count === 0 ? '已交由协作者施工，等待验收' : `${scope.count} 格 · [${scope.bounds.min.join(',')}] 至 [${scope.bounds.max.join(',')}]`;
+    const taskLabel = id => { const task = state.tasks.find(item => item.id === id); return task ? task.to + ' / ' + task.key : id; };
+    const rows = state.tasks.map(task => {
+      const tr = document.createElement('tr');
+      const relations = [...task.dependsOn.map(id => '等待：' + taskLabel(id)), ...(task.parentId ? ['协作来源：' + taskLabel(task.parentId)] : [])].join('；') || '独立任务';
+      for (const value of [task.description, task.to, task.partIds.join(', ') + ' · ' + describeScope(task.workScope), relations, task.status, task.summary ?? task.reason ?? '']) {
+        const td = document.createElement('td'); td.textContent = value; tr.append(td);
+      }
+      return tr;
+    });
+    $('#teamTasks tbody').replaceChildren(...rows);
+    $('#teamProposals tbody').replaceChildren(...(state.proposals ?? []).map(proposal => {
+      const tr = document.createElement('tr');
+      for (const value of [proposal.from + ' → ' + proposal.to, proposal.description + ' · ' + describeScope(proposal.scope),
+        ({ proposed: '等待回应', accepted: '已接受，等待交接', declined: '已拒绝', committed: '已交接', expired: '已失效，需重新协商' })[proposal.status] ?? proposal.status]) {
+        const td = document.createElement('td'); td.textContent = value; tr.append(td);
+      }
+      return tr;
+    }));
+    if (!drag && !linkDraft) render();
+  } catch (error) { $('#teamStatus').textContent = error.message; }
+}
+refreshTeamRuntime();
+setInterval(refreshTeamRuntime, 2000);
 loadCatalog();
+
 </script>
 </body>
 </html>

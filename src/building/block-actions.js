@@ -75,7 +75,7 @@ export function createBlockActions(bot, { vector, walkTo, flyTo, canOccupy, isFl
             await look(add(pos, [0.5, 0.5, 0.5]), signal);
             return { yaw: bot.entity.yaw, pitch: bot.entity.pitch };
         },
-        async digBlock(position, expectedBlock, signal) {
+        async digBlock(position, expectedBlock, signal, authorize) {
             signal?.throwIfAborted();
             if (bot.game.gameMode !== 'creative') throw new Error('请先将机器人设为创造模式');
             const pos = coordinates(position, '删除坐标');
@@ -114,6 +114,7 @@ export function createBlockActions(bot, { vector, walkTo, flyTo, canOccupy, isFl
             if (block.name !== expectedBlock) return 'target_changed';
             if (!bot.canDigBlock(block)) return 'unbreakable';
             if (bot.heldItem) await bot.unequip('hand');
+            await authorize?.([position]);
             signal?.throwIfAborted();
             block = readBlock(pos);
             if (!block) return 'unloaded';

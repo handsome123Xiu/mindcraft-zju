@@ -79,7 +79,7 @@ for (const [name, args] of [
     ['place_cube', { origin: [0, 0, 0], size: 33, block: 'stone' }],
     ['place_cube', { origin: [0, 0, 0], size: 0, block: 'stone' }],
     ['place_cube', { origin: [0.5, 0, 0], size: 1, block: 'stone' }],
-    ['place_cube', { origin: [0, 0, 0], size: 1, block: 'sand' }]
+    ['place_cube', { origin: [0, 0, 0], size: 1, block: 'no_such_block_ever' }]
 ]) assert.throws(() => compilePlacement(name, args));
 
 // Occupancy and unloaded cells abort the entire primitive before the first write.

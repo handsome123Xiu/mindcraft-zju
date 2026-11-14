@@ -110,6 +110,10 @@ export async function executePlacement(primitive, world, { dimension, signal, on
         if (failed && cell.pos.every((n, i) => n === failed.pos[i])) {
             cell.reason = failed.reason;
             if (failed.detail) cell.detail = failed.detail;
+            if (failed.reason === 'entity_in_way') {
+                cell.blockers = world.blockingEntities?.(cell.pos) ?? [];
+                cell.recovery = 'Move yourself clear, or ask the named player/teammate to move; then inspect and retry. Do not repeatedly redesign or poll unchanged cells.';
+            }
         } else if (failed) cell.reason = 'not_attempted';
     }
     return describe(result);

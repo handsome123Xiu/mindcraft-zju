@@ -10,13 +10,29 @@ const paging = { offset: { ...integer, minimum: 0 }, limit: { ...integer, minimu
 const coordinateSpace = { enum: ['world', 'blueprint'] };
 const placement = { block: string, coordinateSpace, preview: { type: 'boolean' }, partId: string,
     assignmentVersion: { ...integer, minimum: 1 } };
-const removal = { expectedBlock: string, coordinateSpace };
+const removal = { expectedBlock: string, coordinateSpace, partId: string, assignmentVersion: { ...integer, minimum: 1 } };
 const row = { start: vector, end: vector };
 const rectangle = { min: vector, max: vector };
 const cube = { origin: vector, size: { ...integer, minimum: 1, maximum: 32 } };
+const taskScope = object({ region, positions: { ...array(vector, 4096), minItems: 1 } });
 
 export const TOOL_SCHEMAS = Object.freeze({
+    get_tool_help: object({ name: string }, ['name']),
+    prepare_parallel_build: object({ axis: { enum: ['auto', 'x', 'z'] } }),
+    delegate_task: object({ key: string, recipient: string, partIds: { ...array(string, 512), minItems: 1 },
+        description: string, success: string, dependsOn: array(string, 200), scope: taskScope, coordinateSpace }, ['key', 'recipient', 'partIds', 'description', 'success']),
+    propose_task_share: object({ key: string, recipient: string, partIds: { ...array(string, 512), minItems: 1 },
+        scope: taskScope, coordinateSpace, description: string, success: string }, ['key', 'recipient', 'partIds', 'scope', 'description', 'success']),
+    respond_task_share: object({ proposalId: string, accept: { type: 'boolean' } }, ['proposalId', 'accept']),
+    commit_task_share: object({ proposalId: string }, ['proposalId']),
+    list_tasks: object({}),
+    reassign_task: object({ taskId: string, recipient: string }, ['taskId', 'recipient']),
     send_message: object({ text: string, recipient: string }, ['text']),
+    broadcast: object({ text: string }, ['text']),
+    list_peers: object({}),
+    claim_part: object({ partId: string }, ['partId']),
+    release_part: object({ partId: string }, ['partId']),
+    query_claims: object({}),
     observe_environment: object({ region, blocks: array(string, 32), excludeBlocks: array(string, 32), ...paging }),
     observe_cells: object({ positions: array(vector, 256), coordinateSpace }, ['positions']),
     inspect_block: object({ position: vector, coordinateSpace }, ['position']),
@@ -45,11 +61,13 @@ const step = object({ id: string, title: { ...string, maxLength: 200 }, success:
 // Empty evidence is valid for unfinished steps; updatePlan checks done evidence.
 step.properties.evidence = { type: 'string', maxLength: 1000 };
 export const ACTION_SCHEMAS = Object.freeze({
+    complete_task: object({ action: { const: 'complete_task' }, summary: string }, ['action', 'summary']),
+    wait_for_team: object({ action: { const: 'wait_for_team' }, reason: string }, ['action', 'reason']),
     update_plan: object({ action: { const: 'update_plan' }, requirements: array(object({ id: string, description: string }, ['id', 'description']), 200),
         steps: { ...array(step, 200), minItems: 1 }, patch: { type: 'boolean' } }, ['action', 'steps']),
     tool: object({ action: { const: 'tool' }, name: { enum: Object.keys(TOOL_SCHEMAS) }, args: { type: 'object' } }, ['action', 'name', 'args']),
     batch: object({ action: { const: 'batch' }, description: { ...string, maxLength: 200 },
-        steps: array(object({ name: { enum: Object.keys(TOOL_SCHEMAS) }, args: { type: 'object' } }, ['name']), 32) },
+        steps: array(object({ name: { enum: [...Object.keys(TOOL_SCHEMAS), 'update_plan'] }, args: { type: 'object' } }, ['name']), 32) },
         ['action', 'steps']),
     skill: object({ action: { const: 'skill' }, name: { const: 'design_blueprint' },
         args: object({ brief: string, origin: vector }) }, ['action', 'name', 'args']),
@@ -111,6 +129,14 @@ export function validateToolArgs(name, args) {
     validateSchema(args, TOOL_SCHEMAS[name], 'args', 'INVALID_ARGUMENT');
 }
 
+export function validateBatchStep(name, args) {
+    if (name !== 'update_plan') return validateToolArgs(name, args);
+    const schema = structuredClone(ACTION_SCHEMAS.update_plan);
+    delete schema.properties.action;
+    schema.required = schema.required.filter(field => field !== 'action');
+    validateSchema(args, schema, 'args', 'INVALID_ARGUMENT');
+}
+
 export function parseAction(text) {
     if (typeof text !== 'string' || !text.trim() || text.length > 24000) throw protocolError('$', '决策响应为空或超出长度限制', 'ONE JSON action object');
     let action;
@@ -138,6 +164,17 @@ export function parseAction(text) {
     };
     action = stripMetadata(action);
     alias(action, 'action', ['type']);
+    // 单键信封兜底：模型偶尔输出 {"update_plan":{...}}（函数名作顶层键、缺
+    // action 字段，形似 native function calling）。仅当顶层恰好一个键且键名为
+    // 已知 action 名时解包——语义完全确定；多键/未知键/数组体仍按原样报错。
+    if (action.action === undefined) {
+        const keys = Object.keys(action);
+        if (keys.length === 1 && Object.hasOwn(ACTION_SCHEMAS, keys[0]) &&
+            action[keys[0]] && typeof action[keys[0]] === 'object' && !Array.isArray(action[keys[0]])) {
+            const { [keys[0]]: body } = action;
+            action = { action: keys[0], ...body };
+        }
+    }
     alias(action, 'args', ['arguments', 'parameters']);
     if (Object.hasOwn(TOOL_SCHEMAS, action.action) || action.action === 'design_blueprint') {
         const { action: name, args, ...inline } = action;
@@ -158,5 +195,43 @@ export function parseAction(text) {
     if (!schema) throw protocolError('action', '未知决策 action：' + String(action.action), Object.keys(ACTION_SCHEMAS));
     validateSchema(action, schema);
     if (action.action === 'tool') validateToolArgs(action.name, action.args);
+    // Validate the WHOLE batch before executing its first step. A malformed
+    // later step must not leave earlier side effects behind.
+    if (action.action === 'batch') action.steps.forEach((step, index) => {
+        try { validateBatchStep(step.name, step.args ?? {}); }
+        catch (error) { error.field = `steps[${index}].${error.field}`; throw error; }
+    });
     return action;
+}
+
+export function decisionContract(actionNames, toolNames) {
+    // Reuse identical leaf schemas instead of paying for the same coordinate
+    // and text constraints in every tool. Validation still uses full schemas.
+    const common = { Text: string, Position: vector, Region: region };
+    const shared = new Map(Object.entries(common).map(([name, schema]) => [JSON.stringify(schema), name]));
+    function compact(value, root = false) {
+        if (!value || typeof value !== 'object') return value;
+        const ref = !root && shared.get(JSON.stringify(value));
+        if (ref) return { $ref: '#/$defs/' + ref };
+        return Array.isArray(value) ? value.map(item => compact(item)) :
+            Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compact(item)]));
+    }
+    const variants = toolNames.map(name => ({ properties: { name: { const: name }, args: { $ref: '#/$defs/' + name } } }));
+    const schemas = actionNames.map(name => {
+        const schema = structuredClone(ACTION_SCHEMAS[name]);
+        if (name === 'tool') { schema.properties.name.enum = toolNames; schema.oneOf = variants; }
+        if (name === 'batch') {
+            const plan = structuredClone(ACTION_SCHEMAS.update_plan);
+            delete plan.properties.action;
+            plan.required = plan.required.filter(field => field !== 'action');
+            const canPlan = actionNames.includes('update_plan');
+            schema.properties.steps.items.properties.name.enum = [...toolNames, ...(canPlan ? ['update_plan'] : [])];
+            schema.properties.steps.items.oneOf = [...variants, ...(canPlan ? [{ properties: { name: { const: 'update_plan' }, args: plan } }] : [])];
+        }
+        return schema;
+    });
+    return { type: 'object', anyOf: schemas.map(schema => compact(schema)), $defs: {
+        ...Object.fromEntries(Object.entries(common).map(([name, schema]) => [name, compact(schema, true)])),
+        ...Object.fromEntries(toolNames.map(name => [name, compact(TOOL_SCHEMAS[name], true)]))
+    } };
 }

@@ -3,14 +3,22 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { readFile, writeFile, readdir, mkdir, rename } from 'node:fs/promises';
+import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { createTeamSupervisor } from './team-supervisor.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const indexHtml = join(dirname(fileURLToPath(import.meta.url)), 'index.html');
 const moduleUrl = path => pathToFileURL(join(root, path)).href;
+function profileFile(name) {
+    if (typeof name !== 'string') throw new Error('缺少 profile 文件名');
+    const path = resolve(root, 'profiles', name.replace(/^profiles[\\/]/, ''));
+    const rel = relative(join(root, 'profiles'), path);
+    if (rel.startsWith('..') || isAbsolute(rel) || !path.endsWith('.json')) throw new Error('Profile 路径无效');
+    return path;
+}
 
 // ---- 反射动作清单（与 agent 实际使用的同一套源码，避免文档漂移） ----
 async function loadCatalog() {
@@ -30,7 +38,7 @@ async function loadCatalog() {
 let cachedSettingsText = '';
 async function readSettings() {
     cachedSettingsText = await readFile(join(root, 'settings.js'), 'utf8');
-    return (await import(moduleUrl('settings.js'))).default;
+    return (await import(moduleUrl('settings.js') + '?revision=' + encodeURIComponent(cachedSettingsText))).default;
 }
 
 // 简单的顶层字段替换：保留注释与格式，只改 "key": value 的值部分。
@@ -65,13 +73,15 @@ function broadcast(line) {
     if (logHistory.length > 2000) logHistory.splice(0, logHistory.length - 2000);
     for (const response of logSubscribers) response.write(`data: ${JSON.stringify(entry)}\n\n`);
 }
+const teamSupervisor = createTeamSupervisor({ root, log: broadcast });
 
 function startAgent({ profile, name, port }) {
+    if (teamSupervisor.running()) throw new Error('团队正在运行，请先停止团队');
     if (agent && !agent.killed && agent.exitCode == null) throw new Error('Agent 已在运行，先停止当前实例');
     const args = [join(root, 'main.js')];
     if (profile) args.push('--profile', profile);
     if (name) args.push('--name', name);
-    const child = spawn(process.execPath, args, { cwd: root, env: { ...process.env, MINECRAFT_PORT: String(port ?? '') },
+    const child = spawn(process.execPath, args, { cwd: root, windowsHide: true, env: { ...process.env, ...(port != null ? { MINECRAFT_PORT: String(port) } : {}) },
         stdio: ['ignore', 'pipe', 'pipe'], shell: false });
     agent = child;
     logHistory = [];
@@ -112,7 +122,7 @@ const server = createServer(async (request, response) => {
             return response.end(await readFile(indexHtml, 'utf8'));
         }
         if (request.method === 'GET' && path === '/api/status') {
-            return json(response, 200, { running: !!(agent && agent.exitCode == null), pid: agent?.pid ?? null });
+            return json(response, 200, { running: !!(agent && agent.exitCode == null) || teamSupervisor.running(), pid: agent?.pid ?? null, team: teamSupervisor.running() });
         }
         if (request.method === 'GET' && path === '/api/catalog') {
             return json(response, 200, await loadCatalog());
@@ -132,18 +142,50 @@ const server = createServer(async (request, response) => {
         }
         if (request.method === 'GET' && path === '/api/profile') {
             const name = url.searchParams.get('name');
-            return json(response, 200, JSON.parse(await readFile(join(root, 'profiles', name), 'utf8')));
+            return json(response, 200, JSON.parse(await readFile(profileFile(name), 'utf8')));
         }
         if (request.method === 'POST' && path === '/api/profile') {
             const { name, config } = await readBody(request);
-            await writeFile(join(root, 'profiles', name), JSON.stringify(config, null, 2) + '\n', 'utf8');
+            await writeFile(profileFile(name), JSON.stringify(config, null, 2) + '\n', 'utf8');
             return json(response, 200, { saved: name });
         }
         if (request.method === 'POST' && path === '/api/agent/start') {
             return json(response, 200, startAgent(await readBody(request)));
         }
         if (request.method === 'POST' && path === '/api/agent/stop') {
+            if (teamSupervisor.running()) return json(response, 200, await teamSupervisor.stop());
             return json(response, 200, stopAgent());
+        }
+        if (request.method === 'GET' && path === '/api/team/runtime') return json(response, 200, teamSupervisor.snapshot());
+        if (request.method === 'POST' && path === '/api/team/start') {
+            if (agent && agent.exitCode == null) throw new Error('请先停止单 agent 实例');
+            const { readTeamSpec } = await import(moduleUrl('src/building/team-state.js'));
+            const options = await readBody(request);
+            return json(response, 200, await teamSupervisor.start({ ...options, spec: await readTeamSpec(join(root, 'bots')), settings: await readSettings() }));
+        }
+        if (request.method === 'POST' && path === '/api/team/stop') return json(response, 200, await teamSupervisor.stop());
+        if (request.method === 'GET' && path === '/api/team') {
+            const { readTeamSpec, readClaims, validateTeamSpec } = await import(moduleUrl('src/building/team-state.js'));
+            const spec = await readTeamSpec(join(root, 'bots'));
+            const claims = teamSupervisor.running() ? { claims: teamSupervisor.snapshot().claims } : await readClaims(join(root, 'bots'));
+            return json(response, 200, { spec, validation: spec ? validateTeamSpec(spec) : { ok: true, errors: [] }, claims });
+        }
+        if (request.method === 'POST' && path === '/api/team') {
+            const { validateTeamSpec, TEAM_PRESETS } = await import(moduleUrl('src/building/team-state.js'));
+            const { spec, preset, names } = await readBody(request);
+            const candidate = preset ? TEAM_PRESETS[preset](names) : spec;
+            if (!candidate) throw new Error('缺少 spec 或 preset');
+            const validation = validateTeamSpec(candidate);
+            if (!validation.ok) return json(response, 400, { error: validation.errors.join('；'), validation });
+            await mkdir(join(root, 'bots'), { recursive: true });
+            const pending = join(root, 'bots', 'team.' + randomUUID() + '.tmp');
+            await writeFile(pending, JSON.stringify(candidate, null, 2) + '\n', 'utf8');
+            await rename(pending, join(root, 'bots', 'team.json'));
+            return json(response, 200, { saved: true, validation, spec: candidate });
+        }
+        if (request.method === 'GET' && path === '/api/team/claims') {
+            const { queryClaims } = await import(moduleUrl('src/building/team-state.js'));
+            return json(response, 200, await queryClaims(join(root, 'bots')));
         }
         if (request.method === 'GET' && path === '/api/logs') {
             response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache',
@@ -163,4 +205,8 @@ const port = Number(process.env.CONSOLE_PORT ?? 8787);
 server.listen(port, '127.0.0.1', () => {
     console.log(`[console] 控制台已启动：http://127.0.0.1:${port}`);
     console.log('[console] 该服务只监听本机，不要暴露到外网。');
+});
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => {
+    try { await teamSupervisor.stop(); stopAgent(); teamSupervisor.close(); }
+    finally { server.close(); process.exit(0); }
 });

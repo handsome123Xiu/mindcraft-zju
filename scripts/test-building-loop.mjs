@@ -77,7 +77,7 @@ function harness(script, options = {}) {
     const feedback = h.agent.snapshot().events.filter(event => event.kind === 'feedback');
     assert.equal(feedback.filter(event => event.output.status === 'error').length, 2);
     assert(feedback.some(event => event.name === 'place_row' && event.output.status === 'completed' && event.output.total === 1));
-    assert(h.calls.filter(call => call.isSkill).every(call => call.instructions.includes('originalGoal')));
+    assert(h.calls.filter(call => call.isSkill).every(call => JSON.parse(call.turns[0].content).originalGoal));
     assert(h.calls.at(-1).context.runId === result.runId);
     assert.equal(h.files.get('state').status, 'completed');
 }
@@ -165,12 +165,12 @@ function harness(script, options = {}) {
     assert.equal(batch.output.executed, 2);
 }
 
-// All five basic actions are available in the actual loop. A pre-existing obstacle
-// is inspected, explicitly removed and replaced; deletion is not hidden in placement.
+// All five basic actions are available in the actual loop. An obstacle appearing
+// after site validation is inspected, explicitly removed and replaced.
 {
-    const blocks = new Map([['0,0,0', 'glass']]);
+    const blocks = new Map();
     const h = harness([plan(), skill, geometry(),
-        { action: 'tool', name: 'place_block', args: { position: [0, 0, 0], block: 'stone' } },
+        () => { blocks.set('0,0,0', 'glass'); return JSON.stringify({ action: 'tool', name: 'place_block', args: { position: [0, 0, 0], block: 'stone' } }); },
         { action: 'tool', name: 'inspect_block', args: { position: [0, 0, 0] } },
         { action: 'tool', name: 'look_at', args: { position: [0, 0, 0] } },
         { action: 'tool', name: 'dig_block', args: { position: [0, 0, 0], expectedBlock: 'glass' } },
@@ -335,6 +335,15 @@ function harness(script, options = {}) {
 // Missing requirement review cannot certify completion; requirement descriptions
 // cannot be weakened, explicit origins cannot move, and arbitrary tools cannot run.
 {
+    const h = harness([{ ...plan(), requirements: [{ id: 'goal', description: '建造两格石头平台，底层已完成' }] },
+        skill, geometry(), row(), plan(true), finish]);
+    assert.equal((await h.agent.start(task)).status, 'completed');
+    assert.equal(h.agent.snapshot().plan.requirements[0].description, request);
+    assert(!h.agent.snapshot().events.some(event => event.name === 'update_plan' && event.output?.status === 'error'));
+    const designCall = h.calls.find(call => call.isSkill);
+    assert(designCall.turns.some(turn => turn.content.includes(request)), 'design still receives the original goal');
+}
+{
     const h = harness([plan(), { action: 'tool', name: 'dig', args: {} },
         { ...skill, args: { origin: [1, 0, 0] } },
         { action: 'update_plan', requirements: [{ id: 'goal', description: '只放一格' }], steps: plan().steps },
@@ -344,7 +353,8 @@ function harness(script, options = {}) {
     const messages = h.agent.snapshot().events.map(event => event.output?.message ?? '').join('\n');
     assert.match(messages, /未知 tool/);
     assert.match(messages, /施工原点不能移动/);
-    assert.match(messages, /不能修改已有需求/);
+    assert.equal(h.agent.snapshot().plan.requirements.find(r => r.id === 'goal').description, task.request);
+    assert(h.agent.snapshot().events.some(event => event.output?.status === 'planned' && event.output.preservedRequirements?.includes('goal')));
     assert.match(messages, /尚未确认原始需求/);
 }
 
@@ -508,7 +518,7 @@ assert.equal(parseBuildMessage('我想要一座石砖小屋', 'andy').action, 'm
     const result = await h.agent.start(task);
     assert.equal(result.status, 'paused');
     assert.equal(result.modelRequests, 3);
-    assert.match(result.reason, /三次.*JSON/);
+    assert.match(result.reason, /三次.*协议/);
     assert.equal(h.blocks.size, 0);
 }
 
@@ -521,6 +531,44 @@ assert.equal(parseBuildMessage('我想要一座石砖小屋', 'andy').action, 'm
     await h.agent.start(task);
     assert(h.reports.some(event => event.event === 'model_request' && event.data.status === 'waiting'));
     assert.equal(h.reports.at(-1).event, 'result');
+}
+
+// Native responses can update the plan alongside tools, preserving order.
+{
+    const { action, ...args } = plan(false);
+    const h = harness([{ action: 'batch', steps: [
+        { name: 'update_plan', args }, { name: 'observe_cells', args: { positions: [[0,0,0]] } }
+    ] }, skill, geometry(), row(), plan(true), finish]);
+    assert.equal((await h.agent.start(task)).status, 'completed');
+    const result = h.files.get('state').events.find(e => e.name === 'batch' && e.kind === 'feedback');
+    assert.deepEqual(result.output.steps.map(step => [step.name, step.status]), [['update_plan','planned'], ['observe_cells','ok']]);
+}
+
+// Invalid plan semantics late in a response cannot execute earlier tools.
+{
+    const h = harness([{ action: 'batch', steps: [
+        { name: 'observe_cells', args: { positions: [[0,0,0]] } },
+        { name: 'update_plan', args: { steps: [{ id: 'missing-title-and-success' }] } }
+    ] }, { action: 'blocked', reason: 'test done' }]);
+    await h.agent.start(task);
+    assert(!h.files.get('state').events.some(e => e.kind === 'tool' && e.name === 'observe_cells'));
+    assert.equal(h.files.get('state').plan.steps.length, 0);
+}
+
+// Batch planning must not bypass the idle teammate coordination boundary.
+{
+    const initial = harness([{ action: 'blocked', reason: 'save initial state' }]);
+    await initial.agent.start(task);
+    const saved = initial.files.get('state');
+    saved.teamCoordination = true;
+    const { action, ...args } = plan(false);
+    const h = harness([{ action: 'batch', steps: [
+        { name: 'observe_cells', args: { positions: [[0,0,0]] } }, { name: 'update_plan', args }
+    ] }, { action: 'blocked', reason: 'test done' }]);
+    h.agent.restore(saved);
+    await h.agent.resume();
+    assert.equal(h.files.get('state').plan.steps.length, 0);
+    assert(!h.files.get('state').events.some(e => e.kind === 'tool' && e.name === 'observe_cells'));
 }
 
 assert.deepEqual(parseBuildMessage('bob，建造一座小屋', 'andy'), { action: 'message', request: 'bob，建造一座小屋' });

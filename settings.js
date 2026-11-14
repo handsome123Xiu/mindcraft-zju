@@ -1,7 +1,7 @@
 const settings = {
     "minecraft_version": "1.21.6", // or specific version like "1.21.6"
     "host": "127.0.0.1", // or "localhost", "your.ip.address.here"
-    "port": 25565, // set to -1 to automatically scan for open ports
+    "port": 51234, // 单人世界请填写“对局域网开放”时显示的实际 LAN 端口
     "auth": "offline", // or "microsoft"
 
     // the mindserver manages all agents and hosts the UI

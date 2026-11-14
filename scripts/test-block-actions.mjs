@@ -58,6 +58,14 @@ function botFixture(options = {}) {
     assert.equal(f.digs(), 1);
 }
 
+// Reauthorize after approach, before the physical dig.
+{
+    const f = botFixture();
+    await assert.rejects(f.actions.digBlock([0, 0, 0], 'stone', undefined, () => { throw new Error('lease revoked'); }), /lease revoked/);
+    assert.equal(f.digs(), 0);
+    assert.equal(f.blocks.get('0,0,0'), 'stone');
+}
+
 // Loaded material, visibility, diggability and the bot's own footing are checked.
 {
     const f = botFixture({ walkTo: async () => false });
@@ -175,6 +183,23 @@ function toolFixture() {
     f.world.moveTo = async () => true;
     assert.equal((await f.tools.call('move_to', { position: [2, 0, 2] })).status, 'unreachable');
     assert.equal((await f.tools.call('look_at', { position: [0, 0, 0] })).status, 'looked');
+}
+
+// An unreachable dig result carries a hint to clear covering blocks first,
+// and observe_cells samples satisfy the design-time observation gate.
+{
+    const f = toolFixture();
+    f.blocks.set('0,0,0', 'glass');
+    f.world.digBlock = async () => 'unreachable';
+    const blocked = await f.tools.call('dig_block', { position: [0, 0, 0], expectedBlock: 'glass' });
+    assert.equal(blocked.status, 'blocked');
+    assert.equal(blocked.reason, 'unreachable');
+    assert(blocked.hint?.includes('自上而下'));
+    f.job.observation = null;
+    const sampled = await f.tools.call('observe_cells', { positions: [[0, 0, 0], [1, 0, 0]] });
+    assert.equal(sampled.kind, 'cells');
+    assert(f.job.observation?.requested >= 1, 'observe_cells must satisfy the design observation gate');
+    assert.equal(f.job.observation.cells.length, 1);
 }
 
 // A server-side removal that finishes during pause still updates the saved journal.

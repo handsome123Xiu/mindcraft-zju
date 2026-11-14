@@ -66,7 +66,7 @@ const assignment = { version: 1, dimension: 'overworld', blueprint };
 const top = { ...assignment, region: { min: [4, -56, -7], max: [12, -56, 1] } };
 assert.equal(prepareAssignment(top).targets.length, 1);
 assert.throws(() => prepareAssignment({ ...assignment, region: { min: [0, -60, -7], max: [12, -56, 1] } }));
-assert.throws(() => compileBlueprint({ shapes: [{ ...shapes[0], block: 'sand' }] }, origin), /重力材料/);
+assert.doesNotThrow(() => compileBlueprint({ shapes: [{ ...shapes[0], block: 'sand' }] }, origin)); // 重力方块放开：可用
 assert.throws(() => compileBlueprint({ shapes: [{ kind: 'pyramid', at: [0, 0, 0], levels: 5, block: 'sand' }] }, origin));
 
 // World fixtures verify blueprints without an automatic construction executor.
@@ -76,7 +76,10 @@ assert.equal(inspectAssignment(assignment, world).verified, 165);
 assert.equal(inspectAssignment(assignment, world).differences.length, 0);
 assert.equal(inspectAssignment(top, world).verified, 1);
 blocks.set('4,-56,-7', 'stone');
-assert.equal(inspectAssignment(top, world).differences[0].reason, 'occupied');
+assert.equal(inspectAssignment(top, world).differences.length, 0, 'space outside authored shapes is not clearance');
+const legacy = structuredClone(top);
+delete legacy.blueprint.clearance;
+assert.equal(inspectAssignment(legacy, world).differences[0].reason, 'occupied', 'old assignments retain their contract');
 blocks.delete('4,-56,-7');
 assert.equal(inspectAssignment(top, { read: () => null }).differences[0].reason, 'unloaded');
 assert.equal(inspectAssignment(assignment, { read: () => 'air' }).verified, 0);
@@ -85,7 +88,8 @@ let calls = 0;
 const planner = createPlanner({
     async sendRequest(turns, instructions, stop, { runId }) {
         calls++;
-        assert.equal(turns[0].content, '建造五层沙子金字塔');
+        assert.equal(JSON.parse(turns[0].content).request, '建造五层沙子金字塔');
+        assert.deepEqual(JSON.parse(turns[0].content).origin, origin);
         assert(!/pyramid|金字塔/i.test(instructions));
         assert.equal(stop, null);
         assert.equal(runId, 'test');
@@ -97,7 +101,7 @@ assert.equal(calls, 1);
 
 // Other requests must receive the model's different geometry, without a fallback.
 const alternate = createPlanner({ async sendRequest(turns) {
-    assert.equal(turns[0].content, 'build a wooden house');
+    assert.equal(JSON.parse(turns[0].content).request, 'build a wooden house');
     return JSON.stringify({ shapes: [{ kind: 'shell', min: [0, 0, 0], max: [4, 3, 4], block: 'oak_planks' }] });
 } });
 const house = await alternate({ request: 'build a wooden house', origin });

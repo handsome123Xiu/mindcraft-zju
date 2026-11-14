@@ -22,6 +22,10 @@ export function createProgressTracker(job, world) {
             observe('blueprint', job.assignment?.blueprint.blocks),
             observe('demolition', job.demolition?.targets),
             observe('checklist', job.checklist),
+            observe('team', job.teamContext && {
+                tasks: job.teamContext.tasks?.map(t => [t.id, t.status, t.to, t.attempt]),
+                proposals: job.teamContext.proposals?.map(p => [p.id, p.status])
+            }),
             observe('observation', job.observation && { region: job.observation.region, counts: job.observation.counts,
                 occupied: job.observation.occupied, offset: job.observation.offset, unloaded: job.observation.unloaded }),
             observe('inspection', job.lastInspection && { verified: job.lastInspection.verified, differences: job.lastInspection.differences })
@@ -29,6 +33,13 @@ export function createProgressTracker(job, world) {
         if (['inspect_block', 'inspect_blueprint', 'inspect_part', 'list_materials'].includes(action?.name) && output && output.status !== 'error') {
             facts.push(observe(action.name, output));
         }
+        // Dispatch/consent is real progress even before the next runtime refresh.
+        const teamResult = result => {
+            if (result?.taskId) facts.push(observe('task:' + result.taskId, [result.status, result.taskId]));
+            if (result?.proposal?.id) facts.push(observe('proposal:' + result.proposal.id, result.proposal.status));
+        };
+        if (!['error', 'blocked'].includes(output?.status)) teamResult(output);
+        for (const step of output?.steps ?? []) if (!['error', 'blocked'].includes(step.status)) teamResult(step.result);
         if (!planned && job.plan.steps.length) { planned = true; facts.push(true); }
         const done = job.plan.steps.filter(step => step.status === 'done').length;
         if (done > maxDone) { maxDone = done; facts.push(true); }

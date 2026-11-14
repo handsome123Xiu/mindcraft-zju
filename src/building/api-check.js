@@ -8,14 +8,16 @@ function failureReason(error, timeoutMs) {
     if (error instanceof ApiCheckTimeout) return '请求超时（' + timeoutMs / 1000 + ' 秒），请检查服务或网络';
     if (error instanceof InvalidCheckReply) return '接口已响应，但没有返回预期的测试结果';
     const message = String(error?.message ?? '');
-    const status = message.match(/^Course API: HTTP (\d{3})$/)?.[1];
+    const status = message.match(/^(?:Course|DeepSeek) API: HTTP (\d{3})$/)?.[1];
     if (status === '401' || status === '403') return '鉴权失败（HTTP ' + status + '），请检查 API Key 和访问权限';
     if (status === '400' || status === '422') return '请求配置不被接受（HTTP ' + status + '），请检查模型名和 params（包括 thinking 参数）';
     if (status === '404') return '接口或模型不存在（HTTP 404），请检查 API 地址和模型名';
+    if (status === '402') return '账户余额不足（HTTP 402），请检查 API 账户余额';
     if (status === '429') return '请求限流或额度不足（HTTP 429）';
     if (status) return '服务请求失败（HTTP ' + status + '），请查看 logs/api-usage.jsonl';
     if (/API key "COURSE_API_KEY" not found/.test(message)) return '缺少 COURSE_API_KEY，请检查 keys.json 或环境变量';
-    if (/需要 course_responses/.test(message)) return '请将模型 api 配置为 course_responses';
+    if (/API key "DEEPSEEK_API_KEY" not found/.test(message)) return '缺少 DEEPSEEK_API_KEY，请检查 keys.json 或环境变量';
+    if (/需要 course_responses/.test(message)) return '请将模型 api 配置为 course_responses 或 deepseek_responses';
     if (/Configure model and API base URL/.test(message)) return '缺少模型名或 API 地址，请检查 andy.json';
     // Do not publish arbitrary exception text, response bodies or credentials in chat.
     return '网络异常或接口未返回完整回复，请查看 logs/api-usage.jsonl';

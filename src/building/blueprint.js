@@ -38,6 +38,9 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
         throw new Error('蓝图需要 1–512 个 shapes');
     }
     const local = new Map();
+    // Air is intentional only inside authored shapes/openings. Empty space
+    // between disconnected buildings is not an implicit demolition target.
+    const domain = new Map();
     const openings = [];
     const parts = new Map();
     let currentPart;
@@ -47,6 +50,7 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
             throw new Error('蓝图超出几何预算或位于施工基准面下方');
         }
         const key = pos.join(',');
+        domain.set(key, pos);
         const old = local.get(key);
         if (replaceFrom && old?.block !== replaceFrom) throw new Error('蓝图 replace 的 from 不匹配：' + key +
             '，预期 ' + replaceFrom + '，实际 ' + (old?.block ?? 'air'));
@@ -81,6 +85,8 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
             if (kind === 'frame' && axes.length !== 2) throw new Error('frame 必须是有两个非零跨度的平面边框');
             if (kind === 'replace') assertMaterial(shape.from, availableMaterials);
             for (const pos of cells(region)) {
+                domain.set(pos.join(','), pos);
+                if (domain.size > MAX_VOLUME) throw new Error('蓝图超出几何预算');
                 if (kind === 'box' || kind === 'replace' ||
                     (kind === 'frame' ? axes : [0, 1, 2]).some(i => pos[i] === region.min[i] || pos[i] === region.max[i])) {
                     write(pos, shape.block, kind === 'replace' ? shape.from : undefined);
@@ -93,6 +99,8 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
     for (const region of openings) {
         for (const pos of cells(region)) {
             if (++expanded > MAX_VOLUME * 2) throw new Error('开口超出几何预算');
+            if (pos.some(n => Math.abs(n) >= MAX_SPAN) || pos[1] < 0) throw new Error('开口超出蓝图坐标范围');
+            domain.set(pos.join(','), pos);
             local.delete(pos.join(','));
         }
     }
@@ -100,7 +108,8 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
     if (!blocks.length) throw new Error('蓝图没有待建方块');
     const min = [...blocks[0].pos];
     const max = [...min];
-    for (const { pos } of blocks) {
+    const clearance = [...domain].filter(([key]) => !local.has(key)).map(([, pos]) => pos.map((n, i) => n + base[i]));
+    for (const pos of [...blocks.map(cell => cell.pos), ...clearance]) {
         pos.forEach((n, i) => {
             min[i] = Math.min(min[i], n);
             max[i] = Math.max(max[i], n);
@@ -108,7 +117,7 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
     }
     const grouped = [...parts.values()].map(part => ({ ...part, positions: [...local.values()]
         .filter(cell => cell.part === part.id).map(cell => cell.pos.map((n, i) => n + base[i])) })).filter(part => part.positions.length);
-    return { version: 1, bounds: bounds({ min, max }, 'blueprint.bounds'), blocks, parts: grouped };
+    return { version: 1, bounds: bounds({ min, max }, 'blueprint.bounds'), blocks, clearance, parts: grouped };
 }
 
 // An assignment is plain JSON. All coordinates below are absolute world coordinates.
@@ -131,6 +140,21 @@ export function prepareAssignment(assignment) {
         }
         blockByPosition.set(pos.join(','), block.block);
     }
-    const expected = [...cells(region)].map(pos => ({ pos, block: blockByPosition.get(pos.join(',')) ?? 'air' }));
+    let expected;
+    if (blueprint.clearance !== undefined) {
+        if (!Array.isArray(blueprint.clearance) || blueprint.clearance.length > MAX_VOLUME) throw new Error('无效的蓝图空位');
+        const airKeys = new Set();
+        for (const value of blueprint.clearance) {
+            const pos = coordinates(value, 'clearance');
+            const key = pos.join(',');
+            if (!includes(whole, pos) || blockByPosition.has(key) || airKeys.has(key)) throw new Error('蓝图空位越界、重复或与实体冲突');
+            airKeys.add(key);
+        }
+        expected = [...blueprint.blocks.map(cell => ({ pos: [...cell.pos], block: cell.block })),
+            ...blueprint.clearance.map(pos => ({ pos: [...pos], block: 'air' }))].filter(cell => includes(region, cell.pos));
+    } else {
+        // Saved assignments keep their original verification contract.
+        expected = [...cells(region)].map(pos => ({ pos, block: blockByPosition.get(pos.join(',')) ?? 'air' }));
+    }
     return { region, expected, targets: expected.filter(cell => cell.block !== 'air') };
 }

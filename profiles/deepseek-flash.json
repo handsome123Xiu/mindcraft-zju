@@ -1,0 +1,20 @@
+{
+  "name": "ZhiXiu",
+  "model": {
+    "api": "deepseek_responses",
+    "model": "deepseek-flash",
+    "url": "https://api.deepseek.com",
+    "params": {
+      "max_output_tokens": 4096,
+      "reasoning": {
+        "effort": "high"
+      },
+      "text": {
+        "format": {
+          "type": "json_object"
+        }
+      }
+    }
+  },
+  "embedding": false
+}

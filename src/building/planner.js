@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { compileBlueprint, MATERIALS } from './blueprint.js';
 import { materialSummary } from './materials.js';
-import { SHAPE_ACTION_GUIDE } from './construction-guidance.js';
 
 export const BLUEPRINT_SKILL = Object.freeze({
     name: 'design_blueprint',
@@ -18,11 +17,17 @@ export function createBlueprintSkill(model) {
         }
         signal?.throwIfAborted();
         const { supportedMaterials = MATERIALS, ...details } = context ?? {};
-        const system = instructions + '\nMATERIAL_CATALOG_POLICY: ' + JSON.stringify(materialSummary(supportedMaterials)) +
-            '\nSHAPE_TO_ACTION_GUIDE: ' + JSON.stringify(SHAPE_ACTION_GUIDE) +
-            '\nOrigin: ' + JSON.stringify(origin) +
-            (context ? '\nTASK_CONTEXT_JSON:\n' + JSON.stringify(details) : '');
-        const text = await model.sendRequest([{ role: 'user', content: request }], system, null, { signal, runId, purpose: 'blueprint' });
+        const input = JSON.stringify({ request, origin, materialCatalog: materialSummary(supportedMaterials), ...details });
+        let text;
+        try {
+            text = await model.sendRequest([{ role: 'user', content: input }], instructions, null, { signal, runId, purpose: 'blueprint' });
+        } catch (error) {
+            if (error.code !== 'API_INCOMPLETE' || !(error.incompleteReason === 'max_output_tokens' ||
+                (error.outputBudget && error.outputTokens >= error.outputBudget))) throw error;
+            signal?.throwIfAborted();
+            text = await model.sendRequest([{ role: 'user', content: input }], instructions, null,
+                { signal, runId, purpose: 'blueprint', blueprintRecovery: true });
+        }
         signal?.throwIfAborted();
         const json = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1');
         let spec;

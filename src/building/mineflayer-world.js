@@ -54,8 +54,8 @@ export function createMineflayerWorld(bot, { flightOptions = {}, movementOptions
         return isAir(block) ? 'air' : block?.name ?? null;
     }
 
-    function obstructed(target) {
-        return [bot.entity, ...Object.values(bot.entities)].some(entity => {
+    function blockingEntities(target) {
+        return [...new Set([bot.entity, ...Object.values(bot.entities)])].filter(entity => {
             if (!entity.position || entity.isValid === false ||
                 (entity !== bot.entity && !['player', 'mob', 'animal', 'hostile'].includes(entity.type))) return false;
             const { x, y, z } = entity.position;
@@ -65,6 +65,7 @@ export function createMineflayerWorld(bot, { flightOptions = {}, movementOptions
                 y + (entity.height || 1.8) > target.y && y < target.y + 1;
         });
     }
+    const obstructed = target => blockingEntities(target).length > 0;
 
     function nearbyStands(target, goal, airborne = false) {
         const current = bot.entity.position.floored();
@@ -150,6 +151,10 @@ export function createMineflayerWorld(bot, { flightOptions = {}, movementOptions
 
     return {
         read,
+        blockingEntities: pos => blockingEntities(new Vec3(...pos)).slice(0, 8).map(entity => ({
+            name: entity.username ?? entity.name ?? entity.type, self: entity === bot.entity,
+            position: ['x', 'y', 'z'].map(axis => Math.round(entity.position[axis] * 100) / 100)
+        })),
         supportedMaterials: () => materials,
         materialInfo(name) {
             return { name, displayName: bot.registry.blocksByName[name]?.displayName,
@@ -192,7 +197,7 @@ export function createMineflayerWorld(bot, { flightOptions = {}, movementOptions
             const [x, y, z] = region.min;
             if (!bot.blockAt(new Vec3(x, y, z))) await move(new GoalNear(x, y, z, 4), signal);
         },
-        async place({ pos, block: material, expectedAt }, signal) {
+        async place({ pos, block: material, expectedAt, authorize }, signal) {
             signal?.throwIfAborted();
             assertCreative();
             assertMaterial(material, materials);
@@ -227,6 +232,9 @@ export function createMineflayerWorld(bot, { flightOptions = {}, movementOptions
             if (!reference || reference.boundingBox !== 'block') return 'missing_reference';
             if (extra && (read(extra) !== 'air' || expectedAt?.(extra) !== material)) return 'changed_during_placement';
             if (extra && obstructed(new Vec3(...extra))) return 'entity_in_way';
+            await authorize?.(extra ? [pos, extra] : [pos]);
+            signal?.throwIfAborted();
+            if (read(pos) !== 'air' || (extra && read(extra) !== 'air')) return 'changed_during_placement';
             const wasSneaking = bot.controlState?.sneak ?? false;
             try {
                 bot.setControlState?.('sneak', true);

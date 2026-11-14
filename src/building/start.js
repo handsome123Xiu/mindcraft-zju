@@ -12,6 +12,9 @@ import { formatTokenUsage } from './token-usage.js';
 import { createMessageSender } from './message-actions.js';
 import { chooseMessageSite } from './chat-site.js';
 import { checkApiConnection } from './api-check.js';
+import { createTeamClient } from './team-client.js';
+import { entryAgent } from './team-runtime.js';
+import { createLazyBuildingModel, BUILDING_MODEL_APIS } from './model.js';
 
 const { Vec3 } = vec3;
 
@@ -34,6 +37,7 @@ export async function startBuildingAgent() {
     if (!/^[a-zA-Z0-9_]{1,16}$/.test(name)) throw new Error('机器人名称必须是 1–16 个字母、数字或下划线');
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('请输入有效的 Minecraft LAN 端口');
 
+    const managedSpec = process.env.MINDCRAFT_TEAM_SPEC ? JSON.parse(process.env.MINDCRAFT_TEAM_SPEC) : null;
     const bot = mineflayer.createBot({
         username: name, host: settings.host, port, version: settings.minecraft_version,
         auth: settings.auth, checkTimeoutInterval: 60000
@@ -41,14 +45,36 @@ export async function startBuildingAgent() {
     bot.loadPlugin(pathfinderModule.pathfinder);
     bot.once('resourcePack', () => bot.acceptResourcePack());
     let controller;
+    let teamClient;
     let startupCheck;
     let apiChecking = false;
+    let minecraftEnded = false;
     const connectionAbort = new AbortController();
-    bot.on('error', error => console.error('[Minecraft]', error.message));
+    const onTeamDisconnect = () => {
+        controller?.stop('paused').catch(error => console.error('[Team]', error.message));
+        if (minecraftEnded) return;
+        // quit is installed by a plugin only after protocol initialization.
+        // end is available even when the initial TCP connection is refused.
+        if (typeof bot.quit === 'function') bot.quit('Team runtime disconnected');
+        else bot.end('Team runtime disconnected');
+        // Before entering play there is no game session to close gracefully.
+        // Plugins may already exist while the login handshake is still pending.
+        if (bot._client?.state !== 'play') bot._client?.socket?.destroy();
+    };
+    if (managedSpec) process.once('disconnect', onTeamDisconnect);
+    bot.on('error', error => {
+        console.error('[Minecraft]', error.message);
+        if (error.code === 'ECONNREFUSED') console.error('[Minecraft] 无法连接 ' + settings.host + ':' + port +
+            '，请确认世界已“对局域网开放”，并在控制台填写游戏提示的实际 LAN 端口。');
+    });
     bot.on('kicked', reason => console.error('[Minecraft] Kicked:', reason));
     bot.on('end', reason => {
+        minecraftEnded = true;
+        if (managedSpec) process.off('disconnect', onTeamDisconnect);
         connectionAbort.abort(new Error('Minecraft disconnected'));
         controller?.stop('paused');
+        teamClient?.close();
+        if (managedSpec && process.connected) process.disconnect();
         console.log('[Minecraft] Disconnected:', reason);
         process.exitCode = 1;
     });
@@ -61,21 +87,7 @@ export async function startBuildingAgent() {
             bot.entity?.isValid !== false && bot.entity) bot.chat('[建筑] ' + text.slice(0, 180));
     }
 
-    let runtimeModel;
-    const model = {
-        modelName: profile.model?.model,
-        async sendRequest(...args) {
-            if (profile.model?.api !== 'course_responses') throw new Error('建筑 Agent 需要 course_responses 模型配置');
-            if (!runtimeModel) {
-                const { CourseResponses } = await import('../models/course_responses.js');
-                runtimeModel = new CourseResponses(profile.model.model, profile.model.url, {
-                    ...profile.model.params,
-                    max_output_tokens: Math.min(profile.model.params?.max_output_tokens ?? 4096, 8192)
-                });
-            }
-            return runtimeModel.sendRequest(...args);
-        }
-    };
+    const model = createLazyBuildingModel(profile.model);
 
     bot.once('spawn', async () => {
         try {
@@ -84,6 +96,76 @@ export async function startBuildingAgent() {
                     tell('检测到行走受阻，正在重新选择路线。');
                 }
             } });
+            // 队友通信：直投优先，离线队友写入其文件信箱，由对方决策间隙取信。
+            const {
+                registerPeer, unregisterPeer, listPeers, peerMessage,
+                deliverDirect, broadcastPeers, appendMailbox, drainMailbox
+            } = await import('./peer-network.js');
+            const botsDir = join('bots');
+            const unregister = registerPeer(name, async message => {
+                console.log('[Peer <- ' + message.from + ']', message.text);
+                await controller.receiveMessage({ request: '[来自队友 ' + message.from + '] ' + message.text,
+                    origin: null, owner: message.from, peerMessage: true });
+            });
+            bot.once('end', unregister);
+            bot.once('kicked', unregister);
+            let peers = {
+                isPeer: peerName => peerName !== name && (listPeers(name).some(peer => peer.name === peerName) ||
+                    drainMailboxCache.has(peerName)),
+                list: () => listPeers(name),
+                async sendToAgent(recipient, text) {
+                    const result = await deliverDirect(peerMessage(name, recipient, text));
+                    if (result.delivered) return { status: 'delivered', recipient, channel: 'direct' };
+                    await appendMailbox(botsDir, recipient, peerMessage(name, recipient, text));
+                    return { status: 'delivered', recipient, channel: 'mailbox', directAttempt: result };
+                },
+                async broadcast(text) { return broadcastPeers(name, text, name); }
+            };
+            // 信箱轮询缓存：把离线队友名记住，让 isPeer 对曾出现在信箱目录的名字返回 true。
+            const drainMailboxCache = new Set();
+            if (!managedSpec) setInterval(async () => {
+                try {
+                    const incoming = await drainMailbox(botsDir, name);
+                    for (const message of incoming) {
+                        drainMailboxCache.add(message.from);
+                        console.log('[Mailbox <- ' + message.from + ']', message.text);
+                        await controller.receiveMessage({ request: '[来自队友 ' + message.from + '] ' + message.text,
+                            origin: null, owner: message.from, peerMessage: true });
+                    }
+                } catch { /* 信箱不存在或正在轮转 */ }
+            }, 5000).unref();
+            // 团队协作：轮询共享 team.json（组织结构），租约读写 claims.json。
+            const teamState = await import('./team-state.js');
+            let teamSpec = null;
+            const teamSpecError = teamSpec ? teamState.validateTeamSpec(teamSpec) : null;
+            if (teamSpecError && !teamSpecError.ok) {
+                console.error('[Team] team.json 无效，忽略团队模式：', teamSpecError.errors.join('；'));
+                teamSpec = null;
+            }
+            if (process.env.MINDCRAFT_LEGACY_TEAM === '1') setInterval(async () => {
+                try {
+                    const next = await teamState.readTeamSpec(botsDir);
+                    if (JSON.stringify(next) !== JSON.stringify(teamSpec)) {
+                        const check = next ? teamState.validateTeamSpec(next) : { ok: true };
+                        if (!check.ok) { console.error('[Team] 新 team.json 无效，保留旧配置：', check.errors.join('；')); return; }
+                        teamSpec = next;
+                        console.log('[Team] 组织结构已更新', next ? '(' + Object.keys(next.agents).join(', ') + ')' : '(已解散)');
+                    }
+                } catch { /* 轮询失败下次再试 */ }
+            }, 3000).unref();
+            let team = {
+                self: name,
+                spec: () => teamSpec,
+                claim: (partId, assignmentVersion) => teamState.claimPart(botsDir, name, partId, { assignmentVersion }),
+                release: partId => teamState.releasePart(botsDir, name, partId),
+                queryClaims: () => teamState.queryClaims(botsDir)
+            };
+            if (managedSpec) {
+                if (!process.send) throw new Error('团队成员需要由控制台启动');
+                teamClient = createTeamClient({ name, spec: managedSpec });
+                team = teamClient;
+                peers = teamClient.peers;
+            }
             const options = {
                 world,
                 sendMessage: createMessageSender(bot),
@@ -95,6 +177,7 @@ export async function startBuildingAgent() {
                     await rename(target + '.tmp', target);
                 },
                 report(event, data) {
+                    if (event === 'team_error') { console.error('[Team]', data.reason); return; }
                     if (event === 'model_request') {
                         const purpose = data.purpose === 'blueprint' ? '设计蓝图' : '决策';
                         if (data.status === 'started') {
@@ -139,7 +222,7 @@ export async function startBuildingAgent() {
                     };
                     const problem = first ? '，首个差异位于 ' + first.pos.join(',') + '，' +
                         (reasons[first.reason] ?? '缺少目标方块') : '';
-                    const statusText = { completed: '完成', waiting_user: '等待你的补充', blocked: '阻塞', paused: '已暂停', cancelled: '已取消' };
+                    const statusText = { completed: '完成', failed: '任务失败并已结束，可直接发送新任务', waiting_user: '等待你的补充', waiting_team: '等待团队', blocked: '阻塞', paused: '已暂停', cancelled: '已取消' };
                     if (data.outcome !== 'conversation') tell((statusText[data.status] ?? data.status) + progress + problem +
                         (data.reason ? '，' + data.reason : '') + '。模型请求 ' + data.modelRequests + ' 次' +
                         (data.summary ? '。' + data.summary : ''));
@@ -147,7 +230,7 @@ export async function startBuildingAgent() {
                 }
             };
             controller = createBuildingLoop({
-                ...options, model, agentName: name,
+                ...options, model, agentName: name, peers, team,
                 maxModelRequests: settings.building_agent?.max_model_requests ?? 30,
                 timeLimitMs: (settings.building_agent?.time_limit_mins ?? 20) * 60 * 1000
             });
@@ -158,6 +241,7 @@ export async function startBuildingAgent() {
             const checked = await startupCheck;
             apiChecking = false;
             if (connectionAbort.signal.aborted) return;
+            teamClient?.attach(controller);
             if (checked.ok) tell(name + ' 已就绪，可直接聊天、提问或描述任务；私聊可用 /msg ' + name + ' 你好');
             else tell('机器人仍在线；请检查 API 配置和服务状态，后续消息会再次尝试调用 API。');
             if (resumeState) tell('已载入任务进度，请确认进入原实验世界后发送“继续建造”');
@@ -168,13 +252,18 @@ export async function startBuildingAgent() {
         }
     });
 
-    async function onMessage(username, message) {
+    async function onMessage(username, message, isWhisper = false) {
         if (!controller || username === name ||
             (settings.only_chat_with.length && !settings.only_chat_with.includes(username))) return;
+        if (managedSpec?.agents[username]) return;
+        if (managedSpec && name !== entryAgent(managedSpec) && !isWhisper) return;
         try {
             console.log('[Chat]', username + ':', message);
             const input = parseBuildMessage(message, name);
             if (!input) return;
+            if (managedSpec && name !== entryAgent(managedSpec) && input.action === 'message') {
+                return tell('请向团队入口 ' + entryAgent(managedSpec) + ' 提交目标；我接收运行时分配的子任务。');
+            }
             console.log('[Chat] action:', input.action);
             if (apiChecking && ['message', 'resume'].includes(input.action)) {
                 tell('API 正在检测，消息已收到，将在检测结束后处理。');
@@ -185,7 +274,7 @@ export async function startBuildingAgent() {
                 const states = { idle: '等待指令', planning: '正在规划', thinking: '正在决策', observing: '正在观察',
                     designing: '正在设计', verifying: '正在验收', moving: '正在移动', flying: '正在飞行', landing: '正在落地', looking: '正在调整朝向',
                     demolishing: '正在删除方块', building: '正在施工', stopping: '正在停止',
-                    paused: '已暂停', waiting_user: '等待你的补充', blocked: '任务遇到阻碍', completed: '已完成', cancelled: '已取消' };
+                    paused: '已暂停', waiting_user: '等待你的补充', blocked: '任务遇到阻碍', failed: '任务失败并已结束，可直接发送新任务', completed: '已完成', cancelled: '已取消' };
                 return tell((states[controller.status()] ?? controller.status()) +
                     (controller.summary ? '。' + controller.summary() : ''));
             }
@@ -197,14 +286,16 @@ export async function startBuildingAgent() {
             }
             if (input.action === 'resume') return await controller.resume();
             const site = chooseMessageSite(bot, username, input.origin, pos => bot.blockAt(new Vec3(...pos)));
-            if (profile.model?.api !== 'course_responses') throw new Error('建筑 Agent 需要 course_responses 模型配置');
-            console.log('[Chat] 已收到消息，交给 Agent 决策。');
-            return await controller.receiveMessage({ request: input.request, ...site, owner: username, originLocked: !!input.origin });
+            if (!BUILDING_MODEL_APIS.includes(profile.model?.api)) throw new Error('建筑 Agent 需要 course_responses 或 deepseek_responses 模型配置');
+            console.log(controller.status() === 'paused' ? '[Chat] 当前任务已暂停，保存补充消息。' : '[Chat] 已收到消息，交给 Agent 决策。');
+            const received = await controller.receiveMessage({ request: input.request, ...site, owner: username, originLocked: !!input.origin });
+            if (received?.notice) tell(received.notice);
+            return received;
         } catch (error) {
             tell(error.message);
         }
     }
 
-    bot.on('chat', onMessage);
-    bot.on('whisper', onMessage);
+    bot.on('chat', (username, message) => onMessage(username, message));
+    bot.on('whisper', (username, message) => onMessage(username, message, true));
 }

@@ -1,5 +1,11 @@
 import { coordinates, prepareAssignment } from './blueprint.js';
 import { inspectCells } from './inspection.js';
+import { scopedParts, taskScope } from './task-scope.js';
+
+export function taskChecklistParts(job, full = false) {
+    const parts = checklistParts(job);
+    return job.teamTask ? scopedParts(parts, job.teamTask.partIds, taskScope(job.teamTask, full)) : parts;
+}
 
 export function checklistParts(job) {
     const { targets, expected } = prepareAssignment(job.assignment);
@@ -57,7 +63,7 @@ function describePart(part, world, origin) {
 
 export function refreshChecklist(job, world) {
     if (!job.assignment) { job.checklist = null; return null; }
-    const parts = checklistParts(job);
+    const parts = taskChecklistParts(job);
     const origin = job.design?.origin ?? job.origin;
     const summaries = parts.map(part => describePart(part, world, origin));
     job.checklist = { assignmentVersion: job.assignmentVersion, origin,
@@ -69,11 +75,31 @@ export function refreshChecklist(job, world) {
 
 // Suggestions contain only missing cells in ONE selected part, after all design
 // replacement/opening operations. They are never executed by this function.
+// Extra/wrong-material blocks become dig suggestions with the
+// actually observed material as expectedBlock.
 export function suggestPartActions(part, world, origin, assignmentVersion, limit = 8) {
     const pending = new Map(part.cells.filter(cell => cell.block !== 'air' && world.read(cell.pos) === 'air')
         .sort((a, b) => a.pos[1] - b.pos[1] || a.pos[0] - b.pos[0] || a.pos[2] - b.pos[2])
         .map(cell => [cell.pos.join(','), cell.block]));
+    const extra = new Map(part.cells.filter(cell => world.read(cell.pos) != null &&
+        world.read(cell.pos) !== 'air' && world.read(cell.pos) !== cell.block)
+        .sort((a, b) => b.pos[1] - a.pos[1] || a.pos[0] - b.pos[0] || a.pos[2] - b.pos[2])
+        .map(cell => [cell.pos.join(','), world.read(cell.pos)]));
     const actions = [];
+    // Extra (occupied) cells become dig suggestions, top-down first so covering
+    // blocks are removed before partially hidden ones become reachable.
+    while (extra.size && actions.length < limit) {
+        const [key, block] = extra.entries().next().value;
+        const [x, y, z] = key.split(',').map(Number);
+        let width = 1;
+        while (extra.get([x + width, y, z].join(',')) === block) width++;
+        for (let dx = 0; dx < width; dx++) extra.delete([x + dx, y, z].join(','));
+        const args = { expectedBlock: block, coordinateSpace: 'blueprint', partId: part.id, assignmentVersion };
+        const name = width === 1 ? 'dig_block' : 'dig_row';
+        Object.assign(args, name === 'dig_block' ? { position: [x, y, z].map((n, i) => n - origin[i]) }
+            : { start: [x, y, z].map((n, i) => n - origin[i]), end: [x + width - 1, y, z].map((n, i) => n - origin[i]) });
+        actions.push({ action: 'tool', name, args });
+    }
     while (pending.size && actions.length < limit) {
         const [key, block] = pending.entries().next().value;
         const [x, y, z] = key.split(',').map(Number);
@@ -89,12 +115,12 @@ export function suggestPartActions(part, world, origin, assignmentVersion, limit
         Object.assign(args, name === 'place_block' ? { position: min } : name === 'place_row' ? { start: min, end: max } : { min, max });
         actions.push({ action: 'tool', name, args });
     }
-    return { actions, moreMissingCells: pending.size,
-        note: '建议只保证坐标、部件和材料符合蓝图；附着面及站位仍需执行时核验。由 Agent 选择单个动作执行。' };
+    return { actions, moreMissingCells: pending.size + extra.size,
+        note: '缺失格子给出 place，多余或材料错误的占位给出 dig（expectedBlock 为现场材料，自上而下）。dig 后重新 inspect_part 确认空气再放置；未知区块先观察。建议不是拆除授权，执行仍受任务范围、租约及站位核验。逐项调用对应函数，不要调用 batch。' };
 }
 
-export function inspectPart(job, world, partId, { offset = 0, limit = 32 } = {}) {
-    const part = checklistParts(job).find(entry => entry.id === partId);
+export function inspectPart(job, world, partId, { offset = 0, limit = 32, fullTask = false } = {}) {
+    const part = taskChecklistParts(job, fullTask).find(entry => entry.id === partId);
     if (!part) throw new Error('未知部件 ' + partId + '；请先 get_build_checklist 查看当前版本的部件 ID');
     const origin = job.design?.origin ?? job.origin;
     const result = inspectCells(part.cells, world);
