@@ -41,6 +41,10 @@ const settings = {
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
     "explicit_task_planning": true,
+    "building_agent": {
+        "max_model_requests": 500, // main-loop decisions and blueprint skill requests combined, per round
+        "time_limit_mins": 240
+    },
     "allow_insecure_coding": true, // allows newAction command and model can write/run code on your computer. enable at own risk
     "allow_vision": false, // allows vision model to interpret screenshots as inputs
     "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // commands to disable and remove from docs. Ex: ["!setMode"]

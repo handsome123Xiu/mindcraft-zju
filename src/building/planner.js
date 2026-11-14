@@ -1,24 +1,45 @@
+import { readFileSync } from 'node:fs';
 import { compileBlueprint, MATERIALS } from './blueprint.js';
+import { materialSummary } from './materials.js';
+import { SHAPE_ACTION_GUIDE } from './construction-guidance.js';
 
-const INSTRUCTIONS = `Turn a Minecraft construction request into one JSON object {"shapes":[...]}. No prose or Markdown.
-If it is not a building request or cannot be represented, output {"shapes":[]}.
-All coordinates are integers relative to the supplied origin (first buildable cell). y>=0. Center x,z near 0. Use -31..31; total extent at most 32 cells per axis and 12000 volume.
-Shapes: {"kind":"point","at":[x,y,z],"block":"stone"}; {"kind":"box"|"shell","min":[x,y,z],"max":[x,y,z],"block":"stone"} (inclusive; shell has floor, walls and roof); {"kind":"opening","min":[x,y,z],"max":[x,y,z]} (subtracts cells from all shapes).
-Design the requested structure yourself using these general primitives. Choose its dimensions, materials and component arrangement from the user's request. Use only supported materials. Roofs and overhangs need adjacent blocks and walking access; sand and gravel require solid support below. Assume flat land. Keep the design compact.
-Different materials must never occupy the same coordinate. A shell includes its entire boundary, so partition that boundary into non-overlapping boxes if it contains multiple materials. All openings are applied after all solid shapes, regardless of order; an opening cannot be filled by a later shape. Check these geometric constraints before returning your design.
-Supported materials: ${MATERIALS.join(', ')}.`;
+export const BLUEPRINT_SKILL = Object.freeze({
+    name: 'design_blueprint',
+    description: 'Design or revise a blueprint using the goal, requirements, observations and failure feedback.',
+    path: new URL('./skills/design-blueprint/SKILL.md', import.meta.url)
+});
 
-export function createPlanner(model) {
-    return async ({ request, origin, signal, runId }) => {
+// Shared skill instructions serve both the agent loop and standalone planner.
+export function createBlueprintSkill(model) {
+    const instructions = readFileSync(BLUEPRINT_SKILL.path, 'utf8');
+    return async ({ request, origin, signal, runId, context }) => {
         if (typeof request !== 'string' || !request.trim() || request.length > 1000) {
             throw new Error('建筑描述需为 1–1000 个字符');
         }
         signal?.throwIfAborted();
-        const text = await model.sendRequest([{ role: 'user', content: request }], INSTRUCTIONS, null, { signal, runId });
+        const { supportedMaterials = MATERIALS, ...details } = context ?? {};
+        const system = instructions + '\nMATERIAL_CATALOG_POLICY: ' + JSON.stringify(materialSummary(supportedMaterials)) +
+            '\nSHAPE_TO_ACTION_GUIDE: ' + JSON.stringify(SHAPE_ACTION_GUIDE) +
+            '\nOrigin: ' + JSON.stringify(origin) +
+            (context ? '\nTASK_CONTEXT_JSON:\n' + JSON.stringify(details) : '');
+        const text = await model.sendRequest([{ role: 'user', content: request }], system, null, { signal, runId, purpose: 'blueprint' });
         signal?.throwIfAborted();
         const json = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1');
         let spec;
-        try { spec = JSON.parse(json); } catch { throw new Error('模型没有返回有效的蓝图 JSON'); }
-        return compileBlueprint(spec, origin);
+        try { spec = JSON.parse(json); } catch { throw Object.assign(new Error('模型没有返回有效的蓝图 JSON；返回单个包含 summary、coverage、shapes 的对象'), { code: 'INVALID_BLUEPRINT_JSON' }); }
+        let blueprint;
+        try { blueprint = compileBlueprint(spec, origin, supportedMaterials); }
+        catch (error) { error.code ??= 'INVALID_BLUEPRINT_GEOMETRY'; throw error; }
+        return {
+            blueprint,
+            summary: typeof spec.summary === 'string' ? spec.summary.slice(0, 1000) : '',
+            coverage: Array.isArray(spec.coverage) ? spec.coverage : [],
+            shapes: spec.shapes
+        };
     };
+}
+
+export function createPlanner(model) {
+    const design = createBlueprintSkill(model);
+    return async options => (await design(options)).blueprint;
 }

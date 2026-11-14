@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mindcraft 建筑代理控制台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #121417; color: #e4e7eb; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; background: #1a1e24; border-bottom: 1px solid #2a2f37; }
+  header h1 { font-size: 17px; margin: 0; }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
+  header .dot.on { background: #2ecc71; box-shadow: 0 0 6px #2ecc71; }
+  header .pid { color: #8b939e; font-size: 12px; }
+  nav { display: flex; gap: 4px; padding: 0 24px; background: #1a1e24; border-bottom: 1px solid #2a2f37; }
+  nav button { background: none; border: none; color: #9aa3ad; padding: 10px 16px; font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; }
+  nav button.active { color: #fff; border-bottom-color: #4f9cf9; }
+  main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+  section { display: none; }
+  section.active { display: block; }
+  .card { background: #1a1e24; border: 1px solid #2a2f37; border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  label { display: block; font-size: 13px; color: #9aa3ad; margin: 10px 0 4px; }
+  input, select, textarea { width: 100%; background: #121417; border: 1px solid #2a2f37; border-radius: 6px; color: #e4e7eb; padding: 8px 10px; font-size: 14px; font-family: inherit; }
+  textarea { font-family: Consolas, monospace; }
+  button.primary { background: #2563eb; border: none; color: #fff; border-radius: 6px; padding: 9px 18px; font-size: 14px; cursor: pointer; }
+  button.danger { background: #b3392f; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; gap: 12px; }
+  .row > * { flex: 1; }
+  #log { background: #0d0f12; border: 1px solid #2a2f37; border-radius: 8px; padding: 10px; height: 420px; overflow-y: auto; font-family: Consolas, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+  #log .t { color: #5b636d; }
+  #log .err { color: #ff7b72; }
+  #log .chat { color: #7ee787; }
+  #log .model { color: #79c0ff; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #2a2f37; vertical-align: top; }
+  th { color: #8b939e; font-weight: 600; cursor: pointer; user-select: none; }
+  td.name { color: #79c0ff; font-family: Consolas, monospace; white-space: nowrap; }
+  td.desc { color: #b8bfc8; }
+  .filter { margin-bottom: 10px; }
+  .badge { display: inline-block; background: #21262e; border: 1px solid #2a2f37; border-radius: 10px; padding: 1px 8px; font-size: 11px; color: #8b939e; margin-right: 4px; }
+  .ok { color: #2ecc71; }
+  .muted { color: #8b939e; font-size: 12px; }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #1f4d33; color: #b7f5d3; border: 1px solid #2ecc71; padding: 10px 18px; border-radius: 8px; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Mindcraft 建筑代理控制台</h1>
+  <span class="pid" id="pidText">未运行</span>
+</header>
+<nav>
+  <button data-tab="control" class="active">控制</button>
+  <button data-tab="settings">设置</button>
+  <button data-tab="profilesTab">Profiles</button>
+  <button data-tab="catalogTab">动作 / 工具 / Skills</button>
+</nav>
+<main>
+  <section id="control" class="active">
+    <div class="card">
+      <h2>启动 Agent</h2>
+      <div class="row">
+        <div><label>Profile（默认取 settings.profiles[0]）</label><select id="profileSelect"></select></div>
+        <div><label>机器人名（默认取 profile.name）</label><input id="botName" placeholder="ZhiXiu"></div>
+        <div><label>Minecraft 端口（LAN 端口）</label><input id="mcPort" type="number" placeholder="51234"></div>
+      </div>
+      <p style="margin-top:14px">
+        <button class="primary" id="startBtn">启动</button>
+        <button class="primary danger" id="stopBtn" disabled>停止</button>
+      </p>
+      <p class="muted">启动即运行 main.js 子进程；日志实时显示在下方。端口留空则使用 settings 里的配置或自动扫描。</p>
+    </div>
+    <div class="card">
+      <h2>实时日志</h2>
+      <div id="log"></div>
+    </div>
+  </section>
+
+  <section id="settings">
+    <div class="card">
+      <h2>settings.js 常用配置</h2>
+      <div class="row">
+        <div><label>minecraft_version</label><input data-setting="minecraft_version"></div>
+        <div><label>host</label><input data-setting="host"></div>
+        <div><label>port（-1 自动扫描）</label><input data-setting="port" type="number"></div>
+      </div>
+      <div class="row">
+        <div><label>building_agent.max_model_requests（每轮模型请求上限）</label><input data-nested="building_agent.max_model_requests" type="number"></div>
+        <div><label>building_agent.time_limit_mins（每轮时限，分钟）</label><input data-nested="building_agent.time_limit_mins" type="number"></div>
+      </div>
+      <div class="row">
+        <div><label>only_chat_with（逗号分隔，空 = 公共聊天）</label><input data-setting="only_chat_with"></div>
+        <div><label>chat_ingame</label><select data-setting="chat_ingame"><option>true</option><option>false</option></select></div>
+      </div>
+      <p style="margin-top:14px"><button class="primary" id="saveSettings">保存设置</button>
+      <span class="muted">保存后对下次启动生效（端口等运行时参数在“控制”页覆盖）。</span></p>
+    </div>
+  </section>
+
+  <section id="profilesTab">
+    <div class="card">
+      <h2>Profiles（profiles/ 目录）</h2>
+      <div class="row">
+        <div><label>选择文件</label><select id="profileFile"></select></div>
+        <div style="flex:0; display:flex; align-items:flex-end"><button class="primary" id="saveProfile">保存</button></div>
+      </div>
+      <label>profile JSON（model.api 目前仅支持 course_responses）</label>
+      <textarea id="profileEditor" rows="18" spellcheck="false"></textarea>
+    </div>
+  </section>
+
+  <section id="catalogTab">
+    <div class="card">
+      <h2>循环动作（Actions）</h2>
+      <p class="muted">模型每轮决策只能返回一个这样的 JSON 对象。</p>
+      <table id="actionTable"><thead><tr><th>action</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>工具（Tools）</h2>
+      <input class="filter" id="toolFilter" placeholder="筛选工具名或描述…">
+      <table id="toolTable"><thead><tr><th>tool</th><th>参数</th><th>说明</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Skills</h2>
+      <table id="skillTable"><thead><tr><th>skill</th><th>说明</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+<script type="module">
+const $ = selector => document.querySelector(selector);
+const $$ = selector => [...document.querySelectorAll(selector)];
+const toast = text => { const el = $('#toast'); el.textContent = text; el.style.display = 'block'; setTimeout(() => el.style.display = 'none', 2500); };
+const api = async (path, options) => {
+  const response = await fetch(path, options && { headers: { 'content-type': 'application/json' }, ...options });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? response.statusText);
+  return body;
+};
+
+// 标签页切换
+$$('nav button').forEach(button => button.onclick = () => {
+  $$('nav button').forEach(b => b.classList.toggle('active', b === button));
+  $$('main section').forEach(s => s.classList.toggle('active', s.id === button.dataset.tab));
+});
+
+// 状态轮询
+async function refreshStatus() {
+  const { running, pid } = await api('/api/status');
+  $('#dot').classList.toggle('on', running);
+  $('#pidText').textContent = running ? `运行中 pid=${pid}` : '未运行';
+  $('#startBtn').disabled = running;
+  $('#stopBtn').disabled = !running;
+}
+setInterval(refreshStatus, 3000);
+refreshStatus();
+
+// 日志 SSE
+const logEl = $('#log');
+const appendLog = entry => {
+  const div = document.createElement('div');
+  const cls = entry.line.includes('[Chat]') ? 'chat' : entry.line.includes('[Course API]') || entry.line.includes('[Agent]') ? 'model'
+    : entry.line.includes('error') || entry.line.includes('Error') ? 'err' : '';
+  div.innerHTML = `<span class="t">${entry.at.slice(11, 19)}</span> `;
+  div.append(entry.line);
+  if (cls) div.className = cls;
+  logEl.append(div);
+  while (logEl.children.length > 1500) logEl.firstChild.remove();
+  logEl.scrollTop = logEl.scrollHeight;
+};
+new EventSource('/api/logs').onmessage = event => {
+  const data = JSON.parse(event.data);
+  if (data.history) data.history.forEach(appendLog); else appendLog(data);
+};
+
+// 启动 / 停止
+$('#startBtn').onclick = async () => {
+  try {
+    await api('/api/agent/start', { method: 'POST', body: JSON.stringify({
+      profile: $('#profileSelect').value || null, name: $('#botName').value.trim() || null,
+      port: Number($('#mcPort').value) || null }) });
+    toast('已启动');
+    refreshStatus();
+  } catch (error) { toast(error.message); }
+};
+$('#stopBtn').onclick = async () => { await api('/api/agent/stop', { method: 'POST' }); toast('停止信号已发送'); };
+
+// 设置页
+async function loadSettings() {
+  const settings = await api('/api/settings');
+  $$('[data-setting]').forEach(input => {
+    const key = input.dataset.setting;
+    const value = settings[key];
+    if (key === 'only_chat_with') input.value = Array.isArray(value) ? value.join(',') : '';
+    else input.value = value ?? '';
+  });
+  $$('[data-nested]').forEach(input => {
+    const [object, key] = input.dataset.nested.split('.');
+    input.value = settings[object]?.[key] ?? '';
+  });
+}
+$('#saveSettings').onclick = async () => {
+  const patch = {};
+  $$('[data-setting]').forEach(input => {
+    const key = input.dataset.setting;
+    if (key === 'only_chat_with') patch[key] = input.value.trim() ? input.value.split(',').map(s => s.trim()).filter(Boolean) : [];
+    else if (input.type === 'number') patch[key] = Number(input.value);
+    else if (input.value === 'true' || input.value === 'false') patch[key] = input.value === 'true';
+    else patch[key] = input.value;
+  });
+  const nested = {};
+  $$('[data-nested]').forEach(input => {
+    const [object, key] = input.dataset.nested.split('.');
+    nested[object] ??= {};
+    nested[object][key] = Number(input.value);
+  });
+  // building_agent 是嵌套对象：单独走 profile 式整体替换不受支持，这里通过 settings 接口逐项打补丁
+  try {
+    await api('/api/settings', { method: 'POST', body: JSON.stringify(patch) });
+    for (const [object, values] of Object.entries(nested)) {
+      const merged = { ...(await api('/api/settings'))[object], ...values };
+      await api('/api/settings', { method: 'POST', body: JSON.stringify({ [object]: merged }) });
+    }
+    toast('设置已保存');
+  } catch (error) { toast(error.message); }
+};
+loadSettings();
+
+// Profiles 页
+async function loadProfiles() {
+  const { files } = await api('/api/profiles');
+  $('#profileFile').innerHTML = files.map(f => `<option>${f.name}</option>`).join('');
+  const rootSelect = $('#profileSelect');
+  const saved = rootSelect.value;
+  rootSelect.innerHTML = '<option value="">（settings 默认）</option>' + files.map(f => `<option>./profiles/${f.name}</option>`).join('');
+  if (saved) rootSelect.value = saved;
+  await loadProfileEditor();
+}
+async function loadProfileEditor() {
+  const name = $('#profileFile').value;
+  if (!name) return;
+  const config = await api('/api/profile?name=' + encodeURIComponent('profiles/' + name));
+  $('#profileEditor').value = JSON.stringify(config, null, 2);
+}
+$('#profileFile').onchange = loadProfileEditor;
+$('#saveProfile').onclick = async () => {
+  try {
+    const config = JSON.parse($('#profileEditor').value);
+    await api('/api/profile', { method: 'POST', body: JSON.stringify({ name: 'profiles/' + $('#profileFile').value, config }) });
+    toast('Profile 已保存');
+  } catch (error) { toast(error.message); }
+};
+loadProfiles();
+
+// 目录页
+async function loadCatalog() {
+  const { tools, actions, skills } = await api('/api/catalog');
+  $('#actionTable tbody').innerHTML = actions.map(a =>
+    `<tr><td class="name">${a.name}</td></tr>`).join('');
+  const renderTools = filter => {
+    const q = filter.toLowerCase();
+    $('#toolTable tbody').innerHTML = tools.filter(t =>
+      !q || t.name.includes(q) || t.description.toLowerCase().includes(q)).map(t =>
+      `<tr><td class="name">${t.name}</td><td><code>${t.args ?? ''}</code></td><td class="desc">${t.description}</td></tr>`).join('');
+  };
+  renderTools('');
+  $('#toolFilter').oninput = event => renderTools(event.target.value);
+  $('#skillTable tbody').innerHTML = skills.map(s =>
+    `<tr><td class="name">${s.name}</td><td class="desc">${s.description}</td></tr>`).join('');
+  $('#catalogCount').textContent = `${actions.length} actions · ${tools.length} tools · ${skills.length} skills`;
+}
+loadCatalog();
+</script>
+</body>
+</html>

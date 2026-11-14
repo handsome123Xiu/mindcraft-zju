@@ -26,6 +26,15 @@ export function buildCourseInput(turns) {
     }));
 }
 
+export class CourseApiError extends Error {
+    constructor(reason, code, details = {}) {
+        super('Course API: ' + reason);
+        this.name = 'CourseApiError';
+        this.code = code;
+        Object.assign(this, details);
+    }
+}
+
 export class CourseResponses {
     static prefix = 'course_responses';
     constructor(modelName, url, params) {
@@ -35,11 +44,30 @@ export class CourseResponses {
         this.params = params || {};
         this.key = getKey('COURSE_API_KEY');
     }
-    async sendRequest(turns, systemMessage, stop = '***', { signal, runId } = {}) {
+    async sendRequest(turns, systemMessage, stop = '***', { signal, runId, onUsage, purpose } = {}) {
         const started = Date.now();
         const record = { timestamp: new Date().toISOString(), model: this.modelName, run_id: runId };
-        const timeout = AbortSignal.timeout(120000);
+        // This is a local transport option, never a parameter sent to the gateway.
+        const { request_timeout_ms: timeoutMs = 120000, ...params } = this.params;
+        let timeout;
+        record.timeout_ms = timeoutMs;
+        record.phase = 'preparing_request';
+        if (['decision', 'blueprint', 'startup', 'diagnostic'].includes(purpose)) record.purpose = purpose;
         try {
+            if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600000) {
+                throw new CourseApiError('request_timeout_ms must be an integer in 1..600000', 'API_CONFIG');
+            }
+            timeout = AbortSignal.timeout(timeoutMs);
+            const input = buildCourseInput(turns);
+            const body = JSON.stringify({ ...params, model: this.modelName,
+                instructions: systemMessage, input, store: false, stream: false });
+            record.request_bytes = Buffer.byteLength(body, 'utf8');
+            record.instructions_chars = systemMessage?.length ?? 0;
+            record.input_chars = input.reduce((sum, turn) => sum + turn.content.length, 0);
+            record.max_output_tokens = params.max_output_tokens ?? null;
+            record.reasoning_effort = params.reasoning?.effort ?? null;
+            record.phase = 'awaiting_headers';
+            console.log(`[Course API] requesting ${this.modelName}: bytes=${record.request_bytes} timeout=${timeoutMs / 1000}s reasoning=${record.reasoning_effort ?? 'default'}`);
             const response = await fetch(this.url, {
                 method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
                 headers: {
@@ -47,31 +75,49 @@ export class CourseResponses {
                     Authorization: `Bearer ${this.key}`,
                     'x-openai-actor-authorization': 'local-image-extension'
                 },
-                body: JSON.stringify({
-                    ...this.params,
-                    model: this.modelName,
-                    instructions: systemMessage,
-                    input: buildCourseInput(turns),
-                    store: false, stream: false
-                })
+                body
             });
             record.http_status = response.status;
-            if (!response.ok) throw new Error('Course API HTTP error');
-            const data = await response.json();
+            record.response_headers_ms = Date.now() - started;
+            if (!response.ok) throw new CourseApiError('HTTP ' + response.status, 'API_HTTP_ERROR');
+            record.phase = 'reading_body';
+            let data;
+            try { data = await response.json(); }
+            catch (error) {
+                if (timeout?.aborted || signal?.aborted) throw error;
+                if (error instanceof SyntaxError) throw new CourseApiError('invalid JSON response', 'API_INVALID_RESPONSE');
+                throw error;
+            }
+            record.phase = 'validating_response';
+            if (!data || typeof data !== 'object' || Array.isArray(data)) throw new CourseApiError('invalid JSON response', 'API_INVALID_RESPONSE');
             record.usage = data.usage ?? null;
             record.response_status = data.status ?? null;
-            const answer = extractFinalText(data, stop);
+            // Account for billed responses even when their answer is incomplete or invalid.
+            onUsage?.(record.usage);
+            let answer;
+            try { answer = extractFinalText(data, stop); }
+            catch {
+                throw new CourseApiError(data.status && data.status !== 'completed' ? 'incomplete model response' : 'invalid or empty final answer',
+                    data.status && data.status !== 'completed' ? 'API_INCOMPLETE' : 'API_INVALID_RESPONSE');
+            }
             record.ok = true;
+            record.phase = 'completed';
             console.log(`[Course API] ${this.modelName}: input=${data.usage?.input_tokens ?? '?'} output=${data.usage?.output_tokens ?? '?'}`);
             return answer;
         } catch (error) {
             record.ok = false;
-            signal?.throwIfAborted();
-            const reason = error?.name === 'TimeoutError' ? 'request timed out' :
-                record.http_status && record.http_status !== 200 ? `HTTP ${record.http_status}` :
-                'network error or invalid/incomplete response';
-            console.error(`[Course API] ${reason}. See ./logs/api-usage.jsonl.`);
-            throw new Error(`Course API: ${reason}`);
+            if (signal?.aborted) {
+                record.error_code = 'ABORTED';
+                signal.throwIfAborted();
+            }
+            const failure = timeout?.aborted || error?.name === 'TimeoutError' ?
+                new CourseApiError('request timed out', 'API_TIMEOUT') :
+                error instanceof CourseApiError ? error : new CourseApiError('network error', 'API_NETWORK_ERROR');
+            record.error_code = failure.code;
+            const causeCode = error?.cause?.code;
+            if (typeof causeCode === 'string' && /^[A-Z0-9_]{1,80}$/.test(causeCode)) record.cause_code = causeCode;
+            console.error(`[Course API] ${failure.message} (${record.phase}, ${(Date.now() - started) / 1000}s). See ./logs/api-usage.jsonl.`);
+            throw Object.assign(failure, { phase: record.phase, timeoutMs, elapsedMs: Date.now() - started, httpStatus: record.http_status });
         } finally {
             record.elapsed_ms = Date.now() - started;
             try {
