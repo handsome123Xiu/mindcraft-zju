@@ -106,6 +106,10 @@
             <button class="primary" data-preset="centralized">中心化</button>
             <button class="primary" data-preset="peers">平等协商</button>
             <button class="primary" data-preset="hierarchy">层级协作</button>
+            <button class="primary" data-preset="review_revision">审查修订</button>
+            <button class="primary" data-preset="router">模型路由</button>
+            <button class="primary" data-preset="competitive">竞争择优</button>
+            <button class="primary" data-preset="voting">多数投票</button>
           </div>
         </div>
       </div>
@@ -143,6 +147,7 @@
 
       <div id="relationshipPanel"><label id="relationshipLabel">选中连线的关系说明</label>
         <textarea id="edgeDescription" rows="3" maxlength="2000" disabled placeholder="例如：A 负责整体规划，B 自行拆分分配给自己的工作并组织 C 完成。B 遇到困难向 A 汇报。"></textarea>
+        <p id="edgeModelNote" class="muted" hidden></p>
       </div>
       <div id="permPanel">
         <div class="perm-cap-row">
@@ -666,7 +671,10 @@ function select(item) {
   $('#nodeInstructions').value = item?.type === 'agent' ? graph.agents[item.name].instructions ?? '' : '';
   $('#roleInput').disabled = item?.type !== 'agent';
   $('#edgeDescription').disabled = $('#edgeLabel').disabled = item?.type !== 'edge';
-  $('#edgeDescription').value = item?.type === 'edge' ? graph.edges[item.index]?.description ?? '' : '';
+  const activeEdge = item?.type === 'edge' ? graph.edges[item.index] : null;
+  $('#edgeDescription').value = activeEdge?.description ?? '';
+  $('#edgeModelNote').textContent = activeEdge?.label === '模型路由' ? activeEdge.note ?? '' : '';
+  $('#edgeModelNote').hidden = !$('#edgeModelNote').textContent;
   $('#relationshipLabel').textContent = item?.type === 'edge' ? `${graph.edges[item.index].from} ↔ ${graph.edges[item.index].to}：如何配合` : '选中连线的关系说明';
   $('#relationshipPanel').hidden = item?.type !== 'edge';
   $('#edgeLabel').parentElement.hidden = item?.type !== 'edge';
@@ -836,23 +844,100 @@ function applyTeamPreset(mode, reset = false) {
     const entry = before.entryAgent ?? names.find(name => before.agents[name].role === 'lead') ?? names[0];
     spec = { ...before, entryAgent: entry, edges: relationshipEdges([entry, ...names.filter(name => name !== entry)], mode) };
   }
+  const title = { centralized: '中心化', peers: '平等协商', hierarchy: '层级协作' }[mode];
+  showPresetDraft(spec, title);
+}
+function showPresetDraft(spec, title) {
   drag = null; linkDraft = null; hoverName = null;
   specToGraph(spec);
   syncToEditor();
   select({ type: 'agent', name: spec.entryAgent });
   markDirty();
-  const title = { centralized: '中心化', peers: '平等协商', hierarchy: '层级协作' }[mode];
   toast(`${title}预设已添加到画布：${agentNames().length} 位伙伴、${graph.edges.length} 条关系，可继续编辑并保存`);
 }
+function applyReviewRevisionPreset() {
+  return applyFixedMemberPreset('review_revision', '审查修订', ['lead', 'builder', 'reviewer'],
+    [[0.26, 0.24], [0.74, 0.49], [0.26, 0.76]]);
+}
+function applyCompetitivePreset() {
+  return applyFixedMemberPreset('competitive', '竞争择优', ['lead', 'candidate_a', 'candidate_b'],
+    [[0.5, 0.24], [0.28, 0.73], [0.72, 0.73]]);
+}
+function applyVotingPreset() {
+  return applyFixedMemberPreset('voting', '多数投票', ['lead', 'voter_1', 'voter_2', 'voter_3'],
+    [[0.5, 0.22], [0.22, 0.63], [0.78, 0.63], [0.5, 0.81]]);
+}
+function applyFixedMemberPreset(mode, title, defaults, positions) {
+  const before = graphToSpec();
+  const existing = Object.keys(before.agents);
+  const size = defaults.length;
+  const useExisting = existing.length > 0 && existing.length <= size;
+  if (existing.length > size && !confirm(title + '需要 ' + size + ' 位成员。用新的预设替换当前画布草稿？')) return;
+  const entry = before.entryAgent ?? existing.find(name => before.agents[name].role === 'lead') ?? existing[0];
+  const names = useExisting ? [entry, ...existing.filter(name => name !== entry)] : [];
+  while (useExisting && names.length < defaults.length) {
+    const base = defaults[names.length];
+    let next = base;
+    for (let suffix = 2; names.includes(next); suffix++) next = base + '_' + suffix;
+    names.push(next);
+  }
+  return loadRolePreset(mode, title, before, names, useExisting, index => positions[index]);
+}
+async function applyRouterPreset() {
+  const before = graphToSpec();
+  const existing = Object.keys(before.agents);
+  const lead = before.entryAgent ?? existing.find(name => before.agents[name].role === 'lead') ?? existing[0];
+  const remaining = existing.filter(name => name !== lead);
+  let router = remaining.find(name => before.agents[name].role === 'router');
+  if (!router) {
+    router = 'router';
+    for (let suffix = 2; existing.includes(router); suffix++) router = 'router_' + suffix;
+  }
+  const names = lead ? [lead, router, ...remaining.filter(name => name !== router)] : [];
+  for (let suffix = 1; lead && names.length < 4; suffix++) {
+    const name = 'builder_' + suffix;
+    if (!names.includes(name)) names.push(name);
+  }
+  return loadRolePreset('router', '模型路由', before, names, !!lead, (index, count) =>
+    index < 2 ? [0.5, index === 0 ? 0.2 : 0.45] : [(index - 1) / (count - 1), 0.77]);
+}
+async function loadRolePreset(mode, title, before, names, useExisting, positionFor) {
+  const query = new URLSearchParams();
+  for (const name of names) {
+    query.append('name', name);
+    if (mode === 'router' && before.agents[name]?.profile) query.set('profile.' + name, before.agents[name].profile);
+  }
+  if ($('#profileSelect').value) query.set('profile', $('#profileSelect').value);
+  const { spec } = await api('/api/team/presets/' + mode + '?' + query);
+  if (JSON.stringify(graphToSpec()) !== JSON.stringify(before)) {
+    return toast('画布已变动，请重新选择' + title + '预设');
+  }
+  const rect = svg.getBoundingClientRect();
+  const width = rect.width || 800, height = rect.height || 460;
+  const members = Object.entries(spec.agents);
+  for (const [index, [name, agent]] of members.entries()) {
+    const [x, y] = positionFor(index, members.length);
+    const previous = useExisting ? before.agents[name] : null;
+    if (previous?.profile) agent.profile = previous.profile;
+    agent.position = previous?.position ?? { x: width * x, y: height * y };
+  }
+  showPresetDraft(spec, title);
+}
 $('#loadCentralizedExample').onclick = () => applyTeamPreset('centralized', true);
-$$('[data-preset]').forEach(button => button.onclick = () => {
-  try { applyTeamPreset(button.dataset.preset); }
+$$('[data-preset]').forEach(button => button.onclick = async () => {
+  try {
+    if (button.dataset.preset === 'review_revision') await applyReviewRevisionPreset();
+    else if (button.dataset.preset === 'router') await applyRouterPreset();
+    else if (button.dataset.preset === 'competitive') await applyCompetitivePreset();
+    else if (button.dataset.preset === 'voting') await applyVotingPreset();
+    else applyTeamPreset(button.dataset.preset);
+  }
   catch (error) { toast(error.message); }
 });
 $('#applyCanvas').onclick = async () => {
   try {
     const spec = JSON.parse($('#teamEditor').value);
-    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec }) });
+    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec, profile: $('#profileSelect').value || null }) });
     markClean('已保存 ✓ 新结构对下次启动团队生效');
     loadTeam(true);
   } catch (error) { toast(error.message); }
@@ -876,9 +961,10 @@ setInterval(loadTeam, 5000);
 async function startTeam(fresh) {
   try {
     const spec = JSON.parse($('#teamEditor').value);
-    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec }) });
+    const profile = $('#profileSelect').value || null;
+    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec, profile }) });
     markClean('团队定义已保存');
-    const result = await api('/api/team/start', { method: 'POST', body: JSON.stringify({ fresh, port: Number($('#mcPort').value) || null, profile: $('#profileSelect').value || null }) });
+    const result = await api('/api/team/start', { method: 'POST', body: JSON.stringify({ fresh, port: Number($('#mcPort').value) || null, profile }) });
     toast('团队已启动，向 ' + result.entryAgent + ' 发送任务');
     await refreshTeamRuntime(); refreshStatus();
   } catch (error) { toast(error.message); }

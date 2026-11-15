@@ -8,7 +8,7 @@ import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { migrateTeamSpec } from '../src/building/team-migration.js';
-import { validateTeamSpec } from '../src/building/team-state.js';
+import { validateTeamSpec, TEAM_PRESETS } from '../src/building/team-state.js';
 import { TOOL_CATALOG } from '../src/building/tools.js';
 import { ACTION_SCHEMAS } from '../src/building/action-protocol.js';
 
@@ -20,7 +20,8 @@ const browserBin = process.env.BROWSER_BIN ?? 'C:/Program Files (x86)/Microsoft/
 let saved = null;
 const server = createServer(async (req, res) => {
     try {
-        const path = new URL(req.url, 'http://localhost').pathname;
+        const requestUrl = new URL(req.url, 'http://localhost');
+        const path = requestUrl.pathname;
         if (path === '/' || path === '/styles.css') {
             res.writeHead(200, { 'content-type': path === '/' ? 'text/html; charset=utf-8' : 'text/css; charset=utf-8' });
             return res.end(await readFile(join(root, 'console', path === '/' ? 'index.html' : 'styles.css')));
@@ -34,6 +35,10 @@ const server = createServer(async (req, res) => {
         if (path === '/api/profiles') value = { files: [{ name: 'andy.json', config: { name: 'ZhiXiu' } }], enabled: ['andy.json'] };
         if (path === '/api/profile') value = { name: 'ZhiXiu', model: { api: 'course_responses', model: 'offline' } };
         if (path === '/api/catalog') value = { tools: TOOL_CATALOG, actions: Object.keys(ACTION_SCHEMAS).map(name => ({ name })), skills: [] };
+        if (path.startsWith('/api/team/presets/')) {
+            const names = requestUrl.searchParams.getAll('name');
+            value = { spec: TEAM_PRESETS[path.split('/').at(-1)](names.length ? names : undefined) };
+        }
         if (path === '/api/team/runtime') value = { running: false, agents: [], tasks: [], proposals: [], claims: {}, runs: [] };
         if (path === '/api/team') {
             if (req.method === 'POST') { assert(validateTeamSpec(data.spec).ok); saved = data.spec; }
@@ -92,22 +97,40 @@ try {
     await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1150, deviceScaleFactor: 1, mobile: false });
     await call('Page.navigate', { url });
     await until(() => evaluate("!!document.querySelector('#teamTasks tbody tr')"), 'Page failed to load');
-    for (const mode of ['hierarchy', 'peers', 'centralized']) {
+    for (const mode of ['voting', 'competitive', 'router', 'review_revision', 'hierarchy', 'peers', 'centralized']) {
         saved = null;
         await call('Page.navigate', { url });
         await until(() => evaluate("!!document.querySelector('#teamTasks tbody tr')"), 'Empty canvas failed to load');
         assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), 0);
+        const memberCount = ['voting', 'router'].includes(mode) ? 4 : 3;
         await click(`[data-preset=${mode}]`);
+        await until(() => evaluate(`document.querySelectorAll('#teamCanvas g').length === ${memberCount}`), 'Preset did not populate the canvas');
         const preset = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
         assert(validateTeamSpec(preset).ok, `${mode} must create a valid team on an empty canvas`);
-        assert.deepEqual(Object.keys(preset.agents), ['lead', 'builder_1', 'builder_2']);
-        assert.equal(preset.edges.length, mode === 'hierarchy' ? 2 : 3);
+        const names = {
+            voting: ['lead', 'voter_1', 'voter_2', 'voter_3'],
+            router: ['lead', 'router', 'builder_1', 'builder_2'],
+            review_revision: ['lead', 'builder', 'reviewer'],
+            competitive: ['lead', 'candidate_a', 'candidate_b']
+        }[mode] ?? ['lead', 'builder_1', 'builder_2'];
+        assert.deepEqual(Object.keys(preset.agents), names);
+        if (mode === 'review_revision') assert.equal(preset.agents.reviewer.role, 'reviewer');
+        if (mode === 'router') assert.equal(preset.agents.router.role, 'router');
+        if (mode === 'competitive') {
+            assert.equal(preset.agents.candidate_a.role, 'candidate');
+            assert(preset.edges.every(edge => edge.from === 'lead'));
+        }
+        if (mode === 'voting') {
+            assert(preset.edges.every(edge => edge.from === preset.entryAgent));
+            assert(preset.edges.every(edge => preset.agents[edge.to].role === 'voter'));
+        }
+        assert.equal(preset.edges.length, ['hierarchy', 'competitive'].includes(mode) ? 2 : 3);
         assert(preset.edges.every(edge => edge.description && !edge.kind && !edge.type));
-        assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), 3);
+        assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), memberCount);
         await click('#applyCanvas');
         await until(() => saved?.coordination === 'relationships', 'Preset was not saved');
         await call('Page.reload');
-        await until(() => evaluate("document.querySelectorAll('#teamCanvas g').length === 3"), 'Saved preset did not survive reload');
+        await until(() => evaluate(`document.querySelectorAll('#teamCanvas g').length === ${memberCount}`), 'Saved preset did not survive reload');
     }
     assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), 3);
     assert.equal(await evaluate("!!document.querySelector('#edgeTypeSelect')"), false);
@@ -124,6 +147,10 @@ try {
     await until(() => saved?.edges?.some(e => e.description.includes('自主拆分')), 'Relation was not saved');
     assert(saved.edges.every(e => !e.type && !e.kind));
     assert(!saved.rules);
+    // Finish the save/reload cycle before editing another preset. A late
+    // loadTeam response otherwise clears the selected role during this test.
+    await call('Page.reload');
+    await until(() => evaluate("document.querySelectorAll('#teamCanvas g').length === 3"), 'Saved relation did not reload');
     await click('#loadCentralizedExample');
     await evaluate('scrollTo(0,0)');
     await screenshot('console-team-desktop.png');
@@ -134,7 +161,13 @@ try {
     await evaluate("document.querySelector('#roleInput').value='architect'; document.querySelector('#roleInput').dispatchEvent(new Event('change',{bubbles:true}));");
     assert.equal(await evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.lead.permissions.blueprintAuthority"), true);
     assert.equal(original.role, 'lead');
-    const configuredAgents = await evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents");
+    const configuredSpec = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
+    const configuredAgents = configuredSpec.agents;
+    await click('[data-preset=review_revision]');
+    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.builder_2.role === 'reviewer'"), 'Review roles were not applied to the existing team');
+    const reviewRevision = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
+    assert.deepEqual(reviewRevision.agents.lead.position, configuredAgents.lead.position);
+    await evaluate(`document.querySelector('#teamEditor').value = ${JSON.stringify(JSON.stringify(configuredSpec))}; document.querySelector('#teamEditor').onblur()`);
     await click('[data-preset=hierarchy]');
     await click('[data-preset=centralized]');
     const rewired = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");

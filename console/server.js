@@ -62,6 +62,31 @@ async function listProfiles() {
     return { files: loaded, enabled: current };
 }
 
+// Add the model name to a Router preset's existing relationship notes.
+async function withRouterModels(spec, profile) {
+    const edges = (spec.edges ?? []).filter(edge => edge.label === '模型路由' && spec.agents[edge.from]?.role === 'router');
+    if (!edges.length) return spec;
+    const fallback = profile || (await readSettings()).profiles?.[0] || 'andy.json';
+    const perProfile = new Map();
+    const modelNote = file => {
+        if (!perProfile.has(file)) perProfile.set(file, (async () => {
+            try {
+                const path = resolve(root, file);
+                const rel = relative(root, path);
+                if (rel.startsWith('..') || isAbsolute(rel) || !path.endsWith('.json')) throw new Error('profile');
+                const { model } = JSON.parse(await readFile(path, 'utf8'));
+                if (!['course_responses', 'deepseek_responses'].includes(model?.api) ||
+                    typeof model.model !== 'string' || !/^[\w./:-]{1,100}$/.test(model.model)) throw new Error('model');
+                return '模型档案：' + model.model + '（' + model.api + '）';
+            } catch { return '模型档案：未识别，请检查该成员的伙伴档案'; }
+        })());
+        return perProfile.get(file);
+    };
+    const notes = new Map(await Promise.all(edges.map(async edge =>
+        [edge, await modelNote(spec.agents[edge.to]?.profile || fallback)])));
+    return { ...spec, edges: spec.edges.map(edge => notes.has(edge) ? { ...edge, note: notes.get(edge) } : edge) };
+}
+
 // ---- agent 子进程管理（单实例） ----
 let agent = null;
 const logSubscribers = new Set();
@@ -168,6 +193,22 @@ const server = createServer(async (request, response) => {
             return json(response, 200, await teamSupervisor.start({ ...options, spec: await readTeamSpec(join(root, 'bots')), settings: await readSettings() }));
         }
         if (request.method === 'POST' && path === '/api/team/stop') return json(response, 200, await teamSupervisor.stop());
+        if (request.method === 'GET' && ['/api/team/presets/review_revision', '/api/team/presets/pipeline', '/api/team/presets/router', '/api/team/presets/competitive', '/api/team/presets/voting'].includes(path)) {
+            const { TEAM_PRESETS, validateTeamSpec } = await import(moduleUrl('src/building/team-state.js'));
+            const names = url.searchParams.getAll('name');
+            const key = path.split('/').at(-1);
+            const preset = TEAM_PRESETS[key === 'pipeline' ? 'review_revision' : key];
+            const spec = preset(names.length ? names : undefined);
+            if (preset === TEAM_PRESETS.router) {
+                for (const [name, agent] of Object.entries(spec.agents)) {
+                    const nodeProfile = url.searchParams.get('profile.' + name);
+                    if (nodeProfile) agent.profile = nodeProfile;
+                }
+            }
+            const validation = validateTeamSpec(spec);
+            if (!validation.ok) return json(response, 400, { error: validation.errors.join('；') });
+            return json(response, 200, { spec: await withRouterModels(spec, url.searchParams.get('profile')) });
+        }
         if (request.method === 'GET' && path === '/api/team') {
             const { readTeamSpec, readClaims, validateTeamSpec } = await import(moduleUrl('src/building/team-state.js'));
             const spec = await readTeamSpec(join(root, 'bots'));
@@ -182,16 +223,17 @@ const server = createServer(async (request, response) => {
         }
         if (request.method === 'POST' && path === '/api/team') {
             const { validateTeamSpec, TEAM_PRESETS } = await import(moduleUrl('src/building/team-state.js'));
-            const { spec, preset, names } = await readBody(request);
-            const candidate = preset ? TEAM_PRESETS[preset](names) : spec;
+            const { spec, preset, names, profile } = await readBody(request);
+            const candidate = preset ? TEAM_PRESETS[preset === 'pipeline' ? 'review_revision' : preset](names) : spec;
             if (!candidate) throw new Error('缺少 spec 或 preset');
             const validation = validateTeamSpec(candidate);
             if (!validation.ok) return json(response, 400, { error: validation.errors.join('；'), validation });
+            const savedSpec = await withRouterModels(candidate, profile);
             await mkdir(join(root, 'bots'), { recursive: true });
             const pending = join(root, 'bots', 'team.' + randomUUID() + '.tmp');
-            await writeFile(pending, JSON.stringify(candidate, null, 2) + '\n', 'utf8');
+            await writeFile(pending, JSON.stringify(savedSpec, null, 2) + '\n', 'utf8');
             await rename(pending, join(root, 'bots', 'team.json'));
-            return json(response, 200, { saved: true, validation, spec: candidate });
+            return json(response, 200, { saved: true, validation, spec: savedSpec });
         }
         if (request.method === 'GET' && path === '/api/team/claims') {
             const { queryClaims } = await import(moduleUrl('src/building/team-state.js'));

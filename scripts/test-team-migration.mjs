@@ -50,5 +50,8 @@ try {
     runtime = createTeamRuntime({ spec: converted, path });
     assert.equal(runtime.snapshot().runs[0].status, 'cancelled', 'archived legacy records remain readable');
 } finally { runtime?.close(); store?.close(); await rm(directory, { recursive: true, force: true }); }
-for (const preset of Object.values(TEAM_PRESETS)) assert(validateTeamSpec(preset(['a', 'b', 'c'])).ok);
+for (const [name, preset] of Object.entries(TEAM_PRESETS)) {
+    const names = name === 'voting' ? ['a', 'b', 'c', 'd'] : ['a', 'b', 'c'];
+    assert(validateTeamSpec(preset(names)).ok, name + ' preset must generate a relationship spec');
+}
 console.log('Team migration passed: preview, explicit conversion, preserved permissions/history, old-run fencing, archive and new-only presets.');
