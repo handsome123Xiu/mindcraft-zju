@@ -152,4 +152,40 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
     assert.equal(after.teamFeed.length, 12, '真人消息不进 feed');
 }
 
+// 复现 pyramid 死锁：builder_2 范围 45/45 已验收却 wait_for_team 等一个不会发给
+// 执行者的 task_result 事件。守卫必须拒绝等待并指路 complete_task。
+{
+    const { createBuildingLoop } = await import('../src/building/loop-agent.js');
+    const { compileBlueprint } = await import('../src/building/blueprint.js');
+    const assignment = { version: 1, dimension: 'overworld',
+        blueprint: compileBlueprint({ shapes: [{ kind: 'point', at: [0, 0, 0], part: 'base', block: 'stone' }] }, [0, 0, 0]) };
+    const blocks = new Map([['0,0,0', 'stone']]);
+    const script = [
+        JSON.stringify({ action: 'wait_for_team', reason: '等 pyr-b1 完成再做上层' }),
+        JSON.stringify({ action: 'update_plan', steps: [{ id: 's1', title: '施工', success: '45 格全部验收', status: 'done', evidence: 'inspect verified 45/45' }] }),
+        JSON.stringify({ action: 'complete_task', summary: '底层东半完成' })];
+    const calls = [];
+    const controller = createBuildingLoop({ world: {
+        read: pos => blocks.get(pos.join(',')) ?? 'air',
+        snapshot: () => ({ dimension: 'overworld', position: [0, 0, 4], gameMode: 'creative' }), async prepare() {}
+    }, model: { async sendRequest(turns) { calls.push(turns); return script.shift() ?? JSON.stringify({ action: 'blocked', reason: 'end' }); } },
+        team: { self: 'builder_2', runtime: true, spec: () => ({ agents: {}, rules: {}, edges: [] }),
+            async refresh(job) { job.teamContext = { tasks: [{ id: 'other', status: 'running', to: 'builder_1', dependsOn: [], parentId: null }] }; } },
+        async save() {} });
+    controller.restore({ version: 1, kind: 'building-loop', id: 'dead-run', teamRunId: 'dead-run',
+        request: '底层东半', owner: 'tester', origin: [0,0,0], dimension: 'overworld', status: 'waiting_user',
+        messages: [{ role: 'user', from: 'tester', content: '底层东半' }], clarifications: [],
+        teamEvents: [], teamFeed: [], assignment, assignmentVersion: 1, design: { origin: [0,0,0] },
+        teamTask: { id: 'pyr-b2', partIds: ['part-1'], from: 'lead', success: '45 格',
+            scope: { positions: [[0,0,0]] }, workScope: { positions: [[0,0,0]] } },
+        plan: { requirements: [{ id: 'goal', description: '底层东半' }], steps: [] },
+        placed: { '0,0,0': 'stone' }, removed: {}, events: [], modelRequests: 0, decisions: 0, elapsedMs: 0,
+        placementAttempts: 1, demolitionAttempts: 0, removalCount: 0 });
+    const result = await controller.resume();
+    assert.equal(result.status, 'completed', 'wait_for_team 被拒绝并指路 complete_task，任务正常完成');
+    const feedbacks = controller.snapshot().events.filter(e => e.kind === 'feedback');
+    assert(feedbacks.some(e => String(e.output?.message ?? '').includes('complete_task')), '守卫反馈指明 complete_task');
+    assert(feedbacks.some(e => String(e.output?.message ?? '').includes('后续层属于其他排队任务')), '反馈说明范围外层不是完成条件');
+}
+
 console.log('Team coordination checks passed: lease tools in catalog, spec validation and presets, role permissions, lease exclusivity/TTL, tool-layer gating with and without a team.');

@@ -40,7 +40,13 @@ const scoped = task => ({ runId: task.runId, taskId: task.id, token: task.token,
         const first = call('lead', 'delegate', delegate('first', 'alpha', ['part-1']));
         assert.equal(call('lead', 'delegate', delegate('first', 'alpha', ['part-1'])).taskId, first.taskId);
         assert.throws(() => call('lead', 'delegate', delegate('first', 'beta', ['part-1'])), /不同委托/);
-        call('lead', 'delegate', delegate('second', 'beta', ['part-2'], [first.taskId]));
+        // 描述提到范围外部件（pyramid 事故模式）：委托成功但返回 warning；
+        // 一致描述的 first 委托（上面已建）无 warning。
+        const mismatch = call('lead', 'delegate', { ...delegate('mismatch', 'beta', ['part-2']), dependsOn: [first.taskId],
+            description: '先建二层，再依次完成 part-1 底层', success: '范围内全部验收' });
+        assert(mismatch.warning?.includes('part-1'), 'warning names the out-of-scope part: ' + mismatch.warning);
+        assert.equal(first.warning, undefined, '一致的描述不带 warning');
+        // part-2 已由 mismatch 委托给 beta（带 dependsOn，扮演原 second 角色）
         assert.equal(call('beta', 'take_task'), null, 'dependency prevents premature work');
         const taken = call('alpha', 'take_task');
         const scope = scoped(taken.task);

@@ -351,7 +351,14 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     const task = { id: randomUUID(), key: idempotencyKey, signature, runId: run.id, blueprintVersion: run.blueprintVersion,
                         from: name, to: args.recipient, partIds, scope, dependsOn, description, success, status: 'queued', attempt: 0, createdAt: now() };
                     state.tasks[task.id] = task;
-                    return { taskId: task.id, status: task.status, partIds, scope: scopeSummary(scope) };
+                    // 描述里提到的部件若不在生效范围内，执行者会被文字误导去等
+                    // 无法写入的层（真实事故：pyr-b2 描述含 part-4/5 但 scope 只有
+                    // 底层）。不阻止委托，但让 lead 立即看到矛盾。
+                    const mentioned = [...description.matchAll(/part-\d+/gi)].map(m => m[0].toLowerCase());
+                    const outside = [...new Set(mentioned)].filter(id => !partIds.includes(id) && known.some(p => p.id === id));
+                    return { taskId: task.id, status: task.status, partIds, scope: scopeSummary(scope),
+                        ...(outside.length ? { warning: '描述提到了不在本任务施工范围内的部件 ' + outside.join(', ') +
+                            '；这些格不在 workScope 内且不可写入。请让描述与范围一致，或用 scope 扩大委托' } : {}) };
                 }
                 if (method === 'propose_share') {
                     const task = requireTask();

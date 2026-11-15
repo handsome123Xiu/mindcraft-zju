@@ -606,6 +606,36 @@ assert.equal(parseBuildMessage('我想要一座石砖小屋', 'andy').action, 'm
     assert(!h.files.get('state').events.some(e => e.kind === 'tool' && e.name === 'observe_cells'));
 }
 
+// 业务规则拒绝带"下一步动作"recovery 与被拒动作摘要：真实日志里裸文本
+// 错误 29% 从未恢复（模型只会重写措辞，如 9 连败只改 evidence）。
+{
+    // 1) design 前缺计划：recovery 指 update_plan 而不是重复"哪里错"。
+    const h1 = harness([{ action: 'skill', name: 'design_blueprint', args: {} }, { action: 'blocked', reason: 'done' }]);
+    await h1.agent.start(task);
+    const fb1 = h1.agent.snapshot().events.find(e => e.output?.code === 'INVALID_PLAN' && String(e.output.message).includes('design_blueprint'));
+    assert(fb1, 'design 前置计划拒绝使用 INVALID_PLAN');
+    assert(fb1.output.expected.steps, 'expected 给出计划示例形状');
+    assert(fb1.output.rejectedAction?.action === 'skill', '附被拒动作摘要');
+
+    // 2) finish 时计划未完成：recovery 教 update_plan patch 标 done。
+    const h2 = harness([observe, plan(), { action: 'skill', name: 'design_blueprint', args: {} }, geometry(),
+        { action: 'tool', name: 'place_row', args: { start: [0,0,0], end: [1,0,0], block: 'stone' } },
+        inspect, { action: 'finish', summary: 'x', requirementReview: [] }, { action: 'blocked', reason: 'done' }]);
+    await h2.agent.start(task);
+    const fb2 = h2.agent.snapshot().events.find(e => e.output?.code === 'PLAN_INCOMPLETE');
+    assert(fb2, 'finish 计划未完成带 PLAN_INCOMPLETE');
+    assert.match(fb2.output.recovery, /patch:true/);
+    assert.match(fb2.output.message, /s1/, '列出未完成步骤 id');
+
+    // 3) 拆除未注册：recovery 给出两步协议。
+    const h3 = harness([{ action: 'tool', name: 'dig_block', args: { position: [0, 0, 0], expectedBlock: 'stone' } },
+        { action: 'blocked', reason: 'done' }]);
+    await h3.agent.start({ ...task, request: '拆除现场方块' });
+    const fb3 = h3.agent.snapshot().events.find(e => e.output?.code === 'NO_DEMOLITION_TARGET');
+    assert(fb3 && /set_demolition_target/.test(fb3.output.recovery), '拆除拒绝的 recovery 指明注册步骤');
+    assert(fb3.output.rejectedAction?.name === 'dig_block', '摘要含被拒工具名');
+}
+
 assert.deepEqual(parseBuildMessage('bob，建造一座小屋', 'andy'), { action: 'message', request: 'bob，建造一座小屋' });
 assert.deepEqual(modelAssertions, [], 'assertions in the model fixture must not be swallowed as recoverable model errors');
 console.log('Building loop checks passed: replanning, skill feedback, explicit placement tools, goal/structure gates, budgets, persistence, pause/resume, non-destructive repair.');

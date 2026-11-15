@@ -363,7 +363,10 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                     }
                     if (action.action === 'skill') {
                         job.status = 'designing';
-                        if (!job.plan.steps.length) throw new Error('请先制定整体计划');
+                        if (!job.plan.steps.length) throw protocolError('steps',
+                            '请先制定整体计划：design_blueprint 在计划存在后才被接受',
+                            { steps: [{ id: 's1', title: '设计并验收', success: '现场与蓝图一致', status: 'running' }] },
+                            'INVALID_PLAN');
                         output = await tools.useSkill(action.name, action.args, signal);
                     }
                     if (action.action === 'blocked') {
@@ -372,6 +375,25 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                     }
                     if (action.action === 'wait_for_team') {
                         if (!team?.runtime) throw new Error('没有团队运行时');
+                        // 持有正在执行的委托且没有未完成协作者时，等待必须有
+                        // 唤醒源：task_result 事件只发给 lead 与发起者，等待队友
+                        // 任务结束的 builder 永远等不到。范围已全部验收就直接
+                        // 指路 complete_task；否则挂短超时自唤醒并注入事实反馈。
+                        if (job.teamTask && !job.teamContext?.tasks.some(task => task.parentId === job.teamTask.id && task.status !== 'completed')) {
+                            const remaining = tools.remainingInTask();
+                            if (!remaining) throw new Error('本委托范围内的部件已全部现场验收通过，没有等待中的协作者；请直接 complete_task 结束本任务。任务描述中超出 workScope 的后续层属于其他排队任务，不是本任务的完成条件');
+                            if ((job.teamEventRevision ?? 0) === teamRevision) {
+                                session.waitTimeout = setTimeout(() => {
+                                    // waiting_team 挂起时 active 已释放；仅当任务仍在
+                                    // 等待且未被其他入口唤醒/接管时重启决策循环。
+                                    if (active || job.status !== 'waiting_team') return;
+                                    record('feedback', 'team_wait_timeout', {},
+                                        { status: 'received', message: '等待团队事件超时：队友任务结果事件不会发送给执行者。检查 constructionChecklist/inspect_part——workScope 内工作（剩余 ' + remaining + ' 格）未完成时继续施工；已全部验收则 complete_task' });
+                                    run().catch(error => report('team_error', { reason: error.message }));
+                                }, 45000);
+                                session.waitTimeout.unref?.();
+                            }
+                        }
                         if (!job.teamTask && !coordinatorHasWork()) {
                             // "没有可执行任务"可能是运行时接管尚未完成（进程退出
                             // 检测、重派与 sweep 都是秒级粒度）。转等待事件而非立刻
@@ -416,9 +438,15 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                             }
                         }
                         const inspection = tools.inspect();
-                        if (inspection.differences.length) throw new Error('现场验收尚未通过：' + JSON.stringify(compactResult(inspection)));
-                        if (job.assignment && job.checklist.parts.some(part => part.status !== 'verified')) throw new Error('部件验收尚未全部通过，请查看施工清单');
-                        if (!job.plan.steps.length || job.plan.steps.some(step => step.status !== 'done')) throw new Error('整体计划仍有未完成步骤');
+                        if (inspection.differences.length) throw Object.assign(
+                            new Error('现场验收尚未通过：' + JSON.stringify(compactResult(inspection))),
+                            { code: 'SITE_DIFFERENCES', recovery: 'Read differences: missing cells -> place via inspect_part suggestions; occupied/wrong-material cells -> dig_block(expectedBlock=observed) then place. Re-run inspect_build before finishing.' });
+                        if (job.assignment && job.checklist.parts.some(part => part.status !== 'verified')) throw Object.assign(
+                            new Error('部件验收尚未全部通过，请查看施工清单'),
+                            { code: 'PARTS_UNVERIFIED', recovery: 'get_build_checklist -> inspect_part(nextPartId) -> execute suggestions; every part reaches verified before finish.' });
+                        if (!job.plan.steps.length || job.plan.steps.some(step => step.status !== 'done')) throw Object.assign(
+                            new Error('整体计划仍有未完成步骤：' + job.plan.steps.filter(step => step.status !== 'done').map(step => step.id).join(', ')),
+                            { code: 'PLAN_INCOMPLETE', recovery: 'Steps with observed evidence should be marked done via update_plan {patch:true, steps:[{id, status:"done", evidence:"observed fact"}]}; genuinely unfinished steps need construction or inspection first.' });
                         const review = job.plan.requirements.map(requirement => {
                             const entry = action.requirementReview?.find(item => item?.requirementId === requirement.id);
                             if (entry?.satisfied !== true) throw new Error('尚未确认原始需求 ' + requirement.id);
@@ -440,15 +468,22 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                             '，已保存进度。请检查网络、额度或 API 配置，然后发送“继续”重试';
                         result = { status: 'paused', reason };
                     }
+                    // 业务规则错误的 recovery 写的是"下一步动作"，不能被协议
+                    // 恢复提示覆盖；协议错误才使用通用格式指引。
+                    const protocolRecovery = ['INVALID_DECISION', 'INVALID_ARGUMENT', 'INVALID_PLAN', 'API_INVALID_RESPONSE', 'TEAM_ROLE_DENIED'].includes(error.code) ?
+                        ((model.decisionProtocol === 'native_functions' || model.provider === 'DeepSeek') ?
+                            'Correct the named field using expected, then call the provided native function directly. No submit_action/tool/batch wrapper or action field. Tool calls and update_plan may share a response; design/wait/finish must be called alone. New plan steps require id,title,success; patch=true updates existing steps and appends new IDs in order.' :
+                            'Correct the named field using expected. The response must be ONE JSON object with a top-level "action" field — using the action name as the only top-level key (e.g. {"update_plan":{...}}) is invalid; write {"action":"update_plan",...} instead. Tool example: {"action":"tool","name":"inspect_build","args":{}}. New plan step requires id,title,success; patch=true updates existing steps and appends new IDs in order.') : null;
                     output = { status: error instanceof InputChangedError ? 'superseded' : 'error', message: error.message,
                         ...(error.code ? { code: error.code } : {}),
                         ...(error.field ? { field: error.field, expected: error.expected } : {}),
                         ...(error.position ? { position: error.position } : {}),
-                        ...(['INVALID_DECISION', 'INVALID_ARGUMENT', 'INVALID_PLAN', 'API_INVALID_RESPONSE', 'TEAM_ROLE_DENIED'].includes(error.code) ? {
-                            recovery: (model.decisionProtocol === 'native_functions' || model.provider === 'DeepSeek') ?
-                                'Correct the named field using expected, then call the provided native function directly. No submit_action/tool/batch wrapper or action field. Tool calls and update_plan may share a response; design/wait/finish must be called alone. New plan steps require id,title,success; patch=true updates existing steps and appends new IDs in order.' :
-                                'Correct the named field using expected. The response must be ONE JSON object with a top-level "action" field — using the action name as the only top-level key (e.g. {"update_plan":{...}}) is invalid; write {"action":"update_plan",...} instead. Tool example: {"action":"tool","name":"inspect_build","args":{}}. New plan step requires id,title,success; patch=true updates existing steps and appends new IDs in order.'
-                        } : {}) };
+                        ...(protocolRecovery ? { recovery: protocolRecovery } : error.recovery ? { recovery: error.recovery } : {}),
+                        // 被拒动作的紧凑摘要：让模型直接对照"我提交了什么"与错误，
+                        // 而不是只看到错误文本后重写措辞。
+                        ...(action && error instanceof InputChangedError === false && action.action ? { rejectedAction: compactResult({
+                            action: action.action, ...(action.name ? { name: action.name } : {}), ...(action.args ? { args: action.args } : {})
+                        }) } : {}) };
                 }
                 record('feedback', action?.name ?? action?.action ?? 'decision_error', action ?? {}, output);
                 await checkpoint();
@@ -483,6 +518,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
         } finally {
             session.finishing = true;
             clearTimeout(timer);
+            clearTimeout(session.waitTimeout);
             if (tools && (job.assignment || job.demolition) && result?.status !== 'completed') {
                 try { result = { ...tools.inspect(), ...result }; }
                 catch { /* A disconnect or dimension change can make final inspection unavailable. */ }

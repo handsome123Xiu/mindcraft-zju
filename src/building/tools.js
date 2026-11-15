@@ -84,6 +84,15 @@ export function requiredText(value, label, max = 1000) {
     return value.trim();
 }
 
+// 业务规则拒绝必须带上"下一步做什么"：真实日志里 29% 的错误链从未恢复，
+// 模型在只有一行错误文本时只会重写措辞而不是执行前置步骤。recovery 写
+// 动作指引（"先 set_demolition_target"），不是重复"哪里错了"。
+export function ruleError(code, message, recovery, field) {
+    const error = new Error(message);
+    Object.assign(error, { code, ...(field ? { field } : {}), ...(recovery ? { recovery } : {}) });
+    return error;
+}
+
 export function createBuildingTools({ world, job, design, checkpoint, onProgress, sendMessage, peers = null, team = null }) {
     let writePart;
     if (team?.runtime) {
@@ -149,7 +158,8 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
     function inspect() {
         snapshot();
         if (!job.assignment) {
-            if (!job.demolition) throw new Error('没有验收目标：建造请先设计蓝图，纯拆除请先 set_demolition_target 注册完整目标');
+            if (!job.demolition) throw ruleError('NO_ACCEPTANCE_TARGET', '没有验收目标：建造请先设计蓝图，纯拆除请先 set_demolition_target 注册完整目标',
+                'Build: plan via update_plan first, then design_blueprint. Pure demolition: observe_environment over the full region, set_demolition_target, dig, then inspect_build.');
             job.lastInspection = inspectDemolition(job.demolition, world);
             return job.lastInspection;
         }
@@ -258,6 +268,14 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                 if (result.remaining) throw new Error('子任务部件尚未通过现场验收：' + partId);
                 return { partId, total: result.total, remaining: result.remaining };
             });
+        },
+        // 委托范围内尚未验收的格数（0 表示范围完成）；供 wait_for_team 守卫使用，
+        // 不像 inspectTask 那样在未完成时抛错。
+        remainingInTask() {
+            snapshot();
+            if (!job.teamTask) return 0;
+            return job.teamTask.partIds.reduce((sum, partId) =>
+                sum + inspectPart(job, world, partId, { fullTask: true }).remaining, 0);
         },
         refreshChecklist() { snapshot(); return refreshChecklist(job, world); },
         async useSkill(name, args, signal) {
@@ -484,17 +502,22 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                 return { status: reached ? ({ move_to: 'moved', fly_to: 'flown', land_at: 'landed' })[name] : 'unreachable',
                     target: position, position: actual, flying: world.snapshot().flying ?? false,
                     ...(!reached ? { reason: world.snapshot().navigation?.reason ??
-                        (name === 'land_at' ? 'landing_unconfirmed' : 'flight_unconfirmed') } : {}) };
+                        (name === 'land_at' ? 'landing_unconfirmed' : 'flight_unconfirmed'),
+                        recovery: 'Retrying the identical target repeats the failure. Change approach: fly_to a position with clear line of sight (or land_at supported ground) nearer the target first, then retry once; for placement targets prefer primitives whose cells have adjacent support.' } : {}) };
             }
             if (DEMOLITION_ACTIONS.includes(name)) {
                 const primitive = compileDemolition(name, args);
-                if (!job.assignment && !job.demolition) throw new Error('纯拆除请先用 set_demolition_target 注册完整拆除范围，再执行 dig 动作');
+                if (!job.assignment && !job.demolition) throw ruleError('NO_DEMOLITION_TARGET',
+                    '纯拆除请先用 set_demolition_target 注册完整拆除范围，再执行 dig 动作',
+                    'observe_environment over the whole intended region -> set_demolition_target(region) -> dig with expectedBlock read from the scan -> inspect_build.');
                 if (team?.spec() || args.partId) await requireLease(args.partId);
                 writePart = args.partId;
                 if (team?.runtime) await team.assertWrite(job, args.partId, primitive.cells.map(cell => cell.pos));
                 for (const cell of primitive.cells) {
                     nearSite(cell.pos);
-                    if (job.demolition && !Object.hasOwn(job.demolition.targets, cell.pos.join(','))) throw new Error('删除坐标不在已登记拆除目标内：' + cell.pos.join(','));
+                    if (job.demolition && !Object.hasOwn(job.demolition.targets, cell.pos.join(','))) throw ruleError('OUTSIDE_DEMOLITION_TARGET',
+                        '删除坐标不在已登记拆除目标内：' + cell.pos.join(','),
+                        'Digging requires prior registration: observe_environment over the full intended region, then set_demolition_target(region), then dig. Re-registering only appends; shrinking an unfinished target is not allowed.');
                 }
                 if (name === 'dig_block') {
                     job.lastRemoval = await digOne(primitive.cells[0].pos, args.expectedBlock, signal);
@@ -545,7 +568,8 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                         const error = new Error('动作必须符合当前蓝图：' + cell.pos.join(',') + '，蓝图材料=' +
                             (planned.get(cell.pos.join(',')) ?? 'air/outside') + '，请求材料=' + cell.block +
                             '。当前蓝图版本=' + job.assignmentVersion + '。请 inspect_part 查询最终格子；frame/opening 不是实心面，蓝图修改须成功后才能按新设计施工');
-                        Object.assign(error, { code: 'BLUEPRINT_MISMATCH', field: 'args', position: cell.pos });
+                        Object.assign(error, { code: 'BLUEPRINT_MISMATCH', field: 'args', position: cell.pos,
+                            recovery: 'Call inspect_part(partId) and execute its suggestions.actions verbatim (they carry correct block/partId/assignmentVersion); mismatched cells may need dig_block(expectedBlock=observed) first, then re-place.' });
                         throw error;
                     }
                 }

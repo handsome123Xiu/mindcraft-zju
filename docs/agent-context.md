@@ -18,6 +18,8 @@
 
 DeepSeek 当前不支持在 thinking 模式强制指定函数，因此决策请求使用 `reasoning.effort=none`；蓝图 skill 仍使用 profile 配置的推理强度。蓝图的固定 skill 说明与动态任务输入分开，去掉重复的几何动作指南。
 
+CORE 指令自 2026-11-15 起以具体 JSON 示例教学协议：单动作 `{"action":"tool",...}`、多步合并为单个 batch、明确禁止把动作名作顶层键（多键信封/追加第二个 JSON 对象都无效）；建造顺序（评估→update_plan→design_blueprint→施工→验收）前置到第二行。背景：真实日志中 52/84 个 run 的首个反馈是错误，多键信封（模型想一次做多件事）与顺序颠倒（跳过 plan 直接 design）是最大两类协议性浪费。
+
 正式启动统一使用 `createLazyBuildingModel`，在延迟初始化时也暴露决策协议。指令、错误恢复和 API 函数通道一致，避免发送旧 JSON/batch 指令却只接受原生函数。常用检查、移动与施工函数始终可用，其余函数按帮助发现。`get_tool_help` 也支持设计 skill。新增计划步骤使用完整 steps（解析期即校验 title/success），patch 按 id 合并更新并按顺序追加新 id；update_plan 语义错误按 INVALID_PLAN 计入连续失败计数。
 
 上下文是视图层确定性裁剪，不改动持久状态：团队生命周期事件进 `teamFeed`（12 条、160 字符、带 kind）而不是聊天窗口；任务列表为紧凑视图（长文本 80/100/120 截断、scope 摘要、无凭据），完整记录靠 `list_tasks`；`get_build_checklist`/`inspect_build` 事件只留计数；JSON 模式指令仅给 focus 工具完整 schema，其余列名指向 `get_tool_help`。真实最坏运行样本实测：recentEvents -67%、team section -53%，新任务的聊天窗口不再被事件灌满（估算整体 -65% 以上）。
