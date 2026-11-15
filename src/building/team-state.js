@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openTeamStore } from './team-store.js';
+import { TOOL_SCHEMAS } from './action-protocol.js';
 
 export const ROLE_PERMISSIONS = Object.freeze({
     lead: {
@@ -31,7 +32,10 @@ export const ROLE_PERMISSIONS = Object.freeze({
 });
 
 export function roleOf(spec, agentName) {
-    const role = spec?.agents?.[agentName]?.role;
+    const entry = spec?.agents?.[agentName];
+    // 自定义角色：内联 permissions 优先于内置角色表。名字自由，权限锚定能力。
+    if (entry?.permissions) return { name: entry.role ?? 'custom', ...ROLE_PERMISSIONS.builder, ...entry.permissions };
+    const role = entry?.role;
     return { name: role ?? 'builder', ...(ROLE_PERMISSIONS[role] ?? ROLE_PERMISSIONS.builder) };
 }
 
@@ -43,14 +47,47 @@ export function actionAllowed(spec, agentName, toolName) {
     return { allowed, role: role.name };
 }
 
+// 能力摘要：运行时与校验锚定的是能力位，不是角色头衔。
+export function capabilities(spec, agentName) {
+    const role = roleOf(spec, agentName);
+    return { name: role.name, canBuild: actionAllowed(spec, agentName, 'place_block').allowed,
+        canDelegate: actionAllowed(spec, agentName, 'delegate_task').allowed,
+        blueprintAuthority: role.blueprintAuthority === true, finishGate: role.finishGate === true };
+}
+
+// Relationship descriptions guide the model; they never grant permissions.
+export function edgeAllows(spec, from, to) {
+    if (!spec?.agents?.[from] || !spec.agents[to] || from === to) return false;
+    return (spec.edges ?? []).some(edge =>
+        (edge.from === from && edge.to === to) || (edge.from === to && edge.to === from));
+}
+
 // ---- team spec 校验：随手画的图必须先过这些硬规则 ----
 export function validateTeamSpec(spec) {
     const errors = [];
+    if (spec?.coordination !== 'relationships') errors.push('仅支持自然语言关系配置，请先转换旧配置（coordination: relationships）');
+    if (spec?.rules != null) errors.push('旧 rules 已移除，请将协作约定写入关系说明并独立配置权限');
     const names = Object.keys(spec?.agents ?? {});
     if (!names.length) errors.push('团队至少需要一个 agent');
     for (const [name, entry] of Object.entries(spec?.agents ?? {})) {
         if (!/^[a-zA-Z0-9_]{1,16}$/.test(name)) errors.push('agent 名无效：' + name);
-        if (entry?.role && !Object.hasOwn(ROLE_PERMISSIONS, entry.role)) errors.push(name + ' 的角色未知：' + entry.role);
+        // 角色名自由：内置表内的名字直接用；表外必须带内联 permissions。
+        if (entry?.role != null) {
+            if (typeof entry.role !== 'string' || !/^[a-z0-9_-]{1,20}$/.test(entry.role)) errors.push(name + ' 的角色名无效（小写字母/数字/-/_，≤20 字符）');
+            else if (!Object.hasOwn(ROLE_PERMISSIONS, entry.role) && entry.permissions == null) errors.push(name + ' 使用自定义角色 ' + entry.role + '，必须提供 permissions（allow/deny/whitelistOnly/blueprintAuthority/finishGate）');
+        }
+        if (entry?.permissions != null) {
+            const p = entry.permissions;
+            if (typeof p !== 'object' || Array.isArray(p)) errors.push(name + ' 的 permissions 必须是对象');
+            else {
+                for (const key of ['allow', 'deny']) if (p[key] != null && (!Array.isArray(p[key]) ||
+                    p[key].some(item => item !== '*' && !Object.hasOwn(TOOL_SCHEMAS, item) && item !== 'design_blueprint')))
+                    errors.push(name + ' 的 permissions.' + key + ' 含未知工具名');
+                if (p.whitelistOnly != null && typeof p.whitelistOnly !== 'boolean') errors.push(name + ' 的 permissions.whitelistOnly 必须是布尔');
+                if (p.whitelistOnly === true && !Array.isArray(p.allow)) errors.push(name + ' 的 whitelistOnly 需要 allow 白名单');
+                for (const key of ['blueprintAuthority', 'finishGate']) if (p[key] != null && typeof p[key] !== 'boolean') errors.push(name + ' 的 permissions.' + key + ' 必须是布尔');
+            }
+        }
         if (entry?.profile != null && (typeof entry.profile !== 'string' || !entry.profile.endsWith('.json'))) errors.push(name + ' 的 profile 必须为 JSON 文件路径');
         if (entry?.position != null && (!Number.isFinite(entry.position.x) || !Number.isFinite(entry.position.y))) errors.push(name + ' 的画布坐标无效');
         if (entry?.instructions != null && (typeof entry.instructions !== 'string' || entry.instructions.length > 2000)) errors.push(name + ' 的职责说明无效');
@@ -62,26 +99,23 @@ export function validateTeamSpec(spec) {
             errors.push('边 ' + index + ' 引用了不存在的 agent');
         }
         if (edge?.from === edge?.to) errors.push('边 ' + index + ' 不能自连');
-        if (!['delegate', 'report', 'message'].includes(edge?.type)) {
-            errors.push('边 ' + index + ' 类型必须是 delegate/report/message');
-        }
-        if (edge?.type === 'delegate' && !['lead', 'builder'].includes(spec?.agents?.[edge.from]?.role)) {
-            errors.push('delegate 边的起点 ' + edge.from + ' 必须是 lead 或 builder');
-        }
+        if (typeof edge?.description !== 'string' || !edge.description.trim() || edge.description.length > 2000) errors.push('边 ' + index + ' 需要 1–2000 字符的自然语言关系说明');
+        if (edge?.kind != null || edge?.type != null) errors.push('自然语言关系不使用 kind/type，请先转换旧连线');
+        if (edge?.label != null && (typeof edge.label !== 'string' || edge.label.length > 20)) errors.push('边 ' + index + ' 标签 ≤20 字符');
+        if (edge?.note != null && (typeof edge.note !== 'string' || edge.note.length > 200)) errors.push('边 ' + index + ' 备注 ≤200 字符');
     }
-    const rules = spec?.rules ?? {};
-    for (const [key, allowed] of Object.entries({
-        assignment: ['lead-assigns', 'spatial-parallel', 'first-claim'],
-        handoff: ['on-part-verified', 'agent-driven'],
-        finish: ['lead-gates', 'any-gates']
-    })) if (rules[key] != null && !allowed.includes(rules[key])) errors.push('规则 ' + key + ' 取值无效');
-    // 连通性：成员之间必须可达（任意边视作无向）。没有任何边时视为
-    // 全对等（消息互通是默认能力，边只用来收紧拓扑）。
-    if (names.length > 1 && (spec?.edges ?? []).length) {
+    const pairs = new Set();
+    for (const edge of spec?.edges ?? []) {
+        const pair = [edge?.from, edge?.to].sort().join(':');
+        if (pairs.has(pair)) errors.push('成员之间只需一条关系连线，请合并双方说明');
+        pairs.add(pair);
+    }
+    // Communication cycles are fine; actual task dependency cycles are not.
+    if (names.length > 1) {
         const adjacency = new Map(names.map(name => [name, new Set()]));
         for (const edge of spec?.edges ?? []) {
-            adjacency.get(edge.from)?.add(edge.to);
-            adjacency.get(edge.to)?.add(edge.from);
+            adjacency.get(edge?.from)?.add(edge?.to);
+            adjacency.get(edge?.to)?.add(edge?.from);
         }
         const seen = new Set([names[0]]);
         const queue = [names[0]];
@@ -90,46 +124,24 @@ export function validateTeamSpec(spec) {
         }
         for (const name of names) if (!seen.has(name)) errors.push(name + ' 与团队不连通，请补边');
     }
-    // 委托无环（delegate 边沿 from→to 方向不能成环）。
-    const delegate = new Map(names.map(name => [name, []]));
-    for (const edge of spec?.edges ?? []) if (edge.type === 'delegate') delegate.get(edge.from)?.push(edge.to);
-    const visiting = new Set(), done = new Set();
-    const cycle = node => {
-        if (done.has(node)) return false;
-        if (visiting.has(node)) return true;
-        visiting.add(node);
-        for (const next of delegate.get(node) ?? []) if (cycle(next)) return true;
-        visiting.delete(node);
-        done.add(node);
-        return false;
-    };
-    for (const name of names) if (cycle(name)) { errors.push('delegate 边形成环：' + name); break; }
-    // 唯一蓝图权威：lead-gates 或 lead-assigns 时必须恰有一个 lead。
-    const leads = names.filter(name => spec.agents[name].role === 'lead');
-    if ((rules.finish === 'lead-gates' || ['lead-assigns', 'spatial-parallel'].includes(rules.assignment)) && leads.length !== 1) {
-        errors.push('该规则需要恰好一个 lead，当前 ' + leads.length + ' 个');
+    if (names.length) {
+        const entry = spec.entryAgent ?? names.find(name => spec.agents[name].role === 'lead') ?? names[0];
+        if (!capabilities(spec, entry).blueprintAuthority || !actionAllowed(spec, entry, 'design_blueprint').allowed) errors.push('本版团队入口需要蓝图设计权限');
+        if (!capabilities(spec, entry).finishGate) errors.push('本版团队入口需要全局验收权限');
     }
     return { ok: !errors.length, errors };
 }
 
 // ---- 预设模板：前端一键生成 spec 的工厂 ----
-export const TEAM_PRESETS = Object.freeze({
-    centralized: names => ({
+function preset(names, mode) {
+    const pairs = mode === 'hierarchy' ? names.slice(1).map((to, i) => [names[i], to]) :
+        names.flatMap((from, i) => names.slice(i + 1).map(to => [from, to]));
+    return { coordination: 'relationships', entryAgent: names[0],
         agents: Object.fromEntries(names.map((name, i) => [name, { role: i === 0 ? 'lead' : 'builder' }])),
-        edges: [...names.slice(1).flatMap(name => [{ from: names[0], to: name, type: 'delegate' }, { from: name, to: names[0], type: 'report' }]),
-            ...names.flatMap(from => names.filter(to => to !== from).map(to => ({ from, to, type: 'message' })))],
-        rules: { assignment: 'lead-assigns', handoff: 'on-part-verified', finish: 'lead-gates' }
-    }),
-    pipeline: names => ({
-        agents: Object.fromEntries(names.map((name, i) => [name, { role: i === 0 ? 'lead' : 'builder' }])),
-        edges: names.slice(1).map(name => ({ from: names[0], to: name, type: 'delegate' })),
-        rules: { assignment: 'first-claim', handoff: 'on-part-verified', finish: 'any-gates' }
-    }),
-    peers: names => ({
-        agents: Object.fromEntries(names.map((name, i) => [name, { role: i === 0 ? 'lead' : 'builder' }])),
-        edges: [], rules: { assignment: 'first-claim', handoff: 'agent-driven', finish: 'any-gates' }
-    })
-});
+        edges: pairs.map(([from, to]) => ({ from, to, description: mode === 'hierarchy' || (mode === 'centralized' && from === names[0]) ?
+            `${from} 分配目标和范围，${to} 按权限执行或组织下级完成，并汇报结果。` : `${from} 与 ${to} 平等协商，根据能力分担工作；通过正式任务或交接记录避免重复施工。` })) };
+}
+export const TEAM_PRESETS = Object.freeze(Object.fromEntries(['centralized', 'peers', 'hierarchy'].map(mode => [mode, names => preset(names, mode)])));
 
 // ---- 文件读写 ----
 async function readJson(path) {

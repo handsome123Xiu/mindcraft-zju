@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { openTeamStore } from './team-store.js';
-import { validateTeamSpec, roleOf } from './team-state.js';
+import { validateTeamSpec, capabilities, actionAllowed, edgeAllows } from './team-state.js';
+export { edgeAllows } from './team-state.js';
 import { checklistParts } from './checklist.js';
 import { coordinates } from './blueprint.js';
 import { partitionBuilding } from './parallel-building.js';
@@ -12,22 +13,22 @@ const text = (value, label, max = 1000) => {
     if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(label + ' 无效');
     return value.trim();
 };
-export function edgeAllows(spec, from, to, type) {
-    if (!spec.agents[from] || !spec.agents[to] || from === to) return false;
-    if (!spec.edges?.length) return true;
-    return spec.edges.some(edge => edge.from === from && edge.to === to && edge.type === type);
-}
 export function entryAgent(spec) {
     return spec.entryAgent ?? Object.keys(spec.agents).find(name => spec.agents[name].role === 'lead') ?? Object.keys(spec.agents)[0];
 }
 
 // The console owns one runtime. Children never write shared JSON state. A run
 // pins its topology; editing the canvas affects the next team launch/run.
-export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, leaseMs = 15000, taskClaimTimeoutMs = 15000, onEvent = () => {}, pauseOnRestore = false }) {
+export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, leaseMs = 15000, taskClaimTimeoutMs = 15000, onEvent = () => {}, pauseOnRestore = false, archiveLegacyRuns = false }) {
     const validation = validateTeamSpec(spec);
     if (!validation.ok) throw new Error(validation.errors.join('；'));
     spec = structuredClone(spec);
     const store = openTeamStore(path);
+    const oldRuns = Object.values(store.read('runtime', initial()).runs).filter(run => run.status === 'active' && !validateTeamSpec(run.spec).ok);
+    if (oldRuns.length && !archiveLegacyRuns) {
+        store.close();
+        throw new Error('旧版工程不能按新版关系恢复。请转换配置并开始新工程；历史任务和现场建筑会保留');
+    }
     const ownerToken = randomUUID();
     try {
         store.transaction('owner', {}, owner => {
@@ -40,8 +41,17 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
         });
     } catch (error) { store.close(); throw error; }
     const live = new Map();
-    const peerState = name => ({ name, online: live.has(name), status: live.get(name)?.status ?? 'offline',
+    const peerState = name => ({ name, capabilities: capabilities(spec, name), online: live.has(name), status: live.get(name)?.status ?? 'offline',
         canAcceptTask: live.get(name)?.canAcceptTask === true });
+    const canWork = (spec, name) => capabilities(spec, name).canBuild || capabilities(spec, name).canDelegate;
+    const dispatcher = (state, task) => state.tasks[task.parentId]?.to ?? task.from;
+    const waitsFor = (state, id, target, seen = new Set()) => {
+        if (id === target) return true;
+        if (seen.has(id) || !state.tasks[id] || terminal(state.tasks[id])) return false;
+        seen.add(id);
+        return [...state.tasks[id].dependsOn, ...Object.values(state.tasks).filter(t => t.parentId === id && !terminal(t)).map(t => t.id)]
+            .some(next => waitsFor(state, next, target, seen));
+    };
     const resetClaimWait = task => {
         delete task.claimWaitSince; delete task.claimStalled;
     };
@@ -79,6 +89,8 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
         }
         return false;
     };
+    const descendantOwns = (state, task, name) => Object.values(state.tasks).some(child =>
+        child.parentId === task.id && !terminal(child) && (child.to === name || descendantOwns(state, child, name)));
     const publicTask = ({ token, finishedToken, scope, workScope, signature, ...task }) => ({ ...task,
         scope: scopeSummary(scope), workScope: scopeSummary(workScope ?? scope) });
     const publicProposal = ({ scope, sourceToken, signature, ...proposal }) => ({ ...proposal, scope: scopeSummary(scope) });
@@ -100,7 +112,10 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
     };
     const report = (state, task, kind, detail = {}) => {
         const run = state.runs[task.runId];
-        const recipients = new Set([run.root, task.from, ...run.spec.edges.filter(e => e.from === task.to && e.type === 'report').map(e => e.to)]);
+        const recipients = new Set([run.root, task.from, dispatcher(state, task)]);
+        let parent = state.tasks[task.parentId];
+        while (parent) { recipients.add(parent.to); parent = state.tasks[parent.parentId]; }
+        recipients.delete(task.to);
         for (const to of recipients) notify(state, run, task.to, to, kind, {
             taskId: task.id, status: task.status, partIds: task.partIds, summary: task.summary ?? task.reason ?? '', ...detail
         });
@@ -150,8 +165,9 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
             const replacement = [...live.keys()].find(name => name !== run.root &&
                 peerState(name).canAcceptTask &&
                 !ancestorOwns(state, task, name) &&
+                !descendantOwns(state, task, name) &&
                 !Object.values(state.tasks).some(t => t.to === name && t.status === 'running') &&
-                roleOf(run.spec, name).name !== 'inspector' && edgeAllows(run.spec, run.root, name, 'delegate'));
+                canWork(run.spec, name) && edgeAllows(run.spec, dispatcher(state, task), name));
             if (replacement) { task.to = replacement; resetClaimWait(task); report(state, task, 'task_reassigned'); }
         }
         for (const task of Object.values(state.tasks)) {
@@ -171,6 +187,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
     // A restarted supervisor cannot assume a previous worker still owns work.
     current = store.transaction('runtime', initial(), state => {
         state.proposals ??= {};
+        for (const old of oldRuns) endRun(state, state.runs[old.id], 'cancelled', '用户开始新版工程，保留旧版历史记录');
         if (pauseOnRestore) for (const run of Object.values(state.runs)) if (run.status === 'active') run.paused = true;
         for (const proposal of Object.values(state.proposals)) if (['proposed', 'accepted'].includes(proposal.status)) proposal.status = 'expired';
         state.claims = {};
@@ -239,6 +256,11 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
             const execute = readOnly ? fn => structuredClone(fn(current)) : mutate;
             return execute(state => {
                 const run = args.runId && state.runs[args.runId];
+                const permission = { delegate: 'delegate_task', prepare_parallel: 'prepare_parallel_build', reassign: 'reassign_task',
+                    propose_share: 'propose_task_share', respond_share: 'respond_task_share', commit_share: 'commit_task_share',
+                    publish: 'design_blueprint', claim: 'claim_part', release: 'release_part',
+                    message: args.recipient ? 'send_message' : 'broadcast' }[method];
+                if (permission && !actionAllowed(run?.spec ?? spec, name, permission).allowed) throw new Error('权限不足：' + permission + '；请调整协作方案或由用户修改权限');
                 const requireRun = () => {
                     if (!run || !run.spec.agents[name] || run.status !== 'active') throw new Error('工程不存在或已结束');
                     return run;
@@ -284,6 +306,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 if (method === 'publish') {
                     requireRun();
                     if (run.root !== name) throw new Error('只有工程协调者可以发布蓝图');
+                    if (!capabilities(run.spec, name).blueprintAuthority) throw new Error('缺少蓝图设计权限');
                     if (Object.values(state.tasks).some(t => t.runId === run.id && !terminal(t))) throw new Error('请先完成或取消现有子任务，再修订蓝图');
                     if (Object.values(state.claims).some(c => c.runId === run.id)) throw new Error('请先释放施工租约再修订蓝图');
                     if (args.previousVersion !== run.blueprintVersion) throw new Error('蓝图版本已变化');
@@ -300,7 +323,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     const groupKey = text(args.key, '并行 key', 80);
                     const workers = args.workers;
                     if (!Array.isArray(workers) || new Set(workers).size !== workers.length || workers.length < 2 || workers.length > 8) throw new Error('需要 2–8 名不同施工成员');
-                    for (const worker of workers) if (!edgeAllows(run.spec, name, worker, 'delegate') || roleOf(run.spec, worker).name !== 'builder') throw new Error('施工成员缺少 builder 角色或委托连线');
+                    for (const worker of workers) if (!edgeAllows(run.spec, name, worker) || !capabilities(run.spec, worker).canBuild) throw new Error('施工成员缺少施工权限或协作连线');
                     const signature = JSON.stringify({ workers, axis: args.axis ?? 'auto', version: args.blueprintVersion });
                     if (run.parallel?.key === groupKey) {
                         if (run.parallel.signature !== signature) throw new Error('同一个 key 对应不同并行方案');
@@ -325,10 +348,12 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'delegate') {
                     requireRun();
+                    if (run.paused) throw new Error('团队工程已暂停');
                     if (!run.assignment || args.blueprintVersion !== run.blueprintVersion) throw new Error('请先发布当前蓝图');
-                    if (!edgeAllows(run.spec, name, args.recipient, 'delegate')) throw new Error('画布没有允许此委托的连线');
-                    if (roleOf(run.spec, args.recipient).name === 'inspector') throw new Error('施工任务需要有施工能力的成员');
-                    if (name !== run.root) throw new Error('当前版本由工程协调者派发施工任务');
+                    if (!edgeAllows(run.spec, name, args.recipient)) throw new Error('画布没有允许此委托的连线');
+                    if (!canWork(run.spec, args.recipient)) throw new Error('任务接收者需要施工或范围内委托权限');
+                    const parent = name === run.root ? null : requireTask();
+                    if (args.recipient === run.root || (parent && (args.recipient === parent.to || ancestorOwns(state, parent, args.recipient)))) throw new Error('不能委托给正在等待它的上级任务执行者或工程入口');
                     const idempotencyKey = text(args.key, '委托 key', 80);
                     let partIds = [...new Set(args.partIds ?? [])];
                     const known = parts(run);
@@ -341,30 +366,47 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     const dependsOn = [...new Set(args.dependsOn ?? [])];
                     if (dependsOn.some(id => !state.tasks[id] || state.tasks[id].runId !== run.id || state.tasks[id].blueprintVersion !== run.blueprintVersion || ['cancelled', 'superseded'].includes(state.tasks[id].status))) throw new Error('任务依赖无效');
                     const description = text(args.description, '子任务目标'), success = text(args.success, '验收标准');
+                    if (parent && dependsOn.some(id => waitsFor(state, id, parent.id))) throw new Error('任务依赖会形成循环等待，不能依赖自己或等待自己的任务');
                     const signature = JSON.stringify({ to: args.recipient, partIds: [...partIds].sort(), dependsOn: [...dependsOn].sort(), description, success,
+                        ...(parent ? { parentId: parent.id } : {}),
                         ...(scope ? { scope } : {}) });
-                    const existing = Object.values(state.tasks).find(t => t.runId === run.id && t.blueprintVersion === run.blueprintVersion && t.key === idempotencyKey);
-                    if (existing) { if (existing.signature !== signature) throw new Error('同一个 key 对应不同委托；' + conflictHint(existing)); return { taskId: existing.id, status: existing.status, partIds, scope: scopeSummary(scope) }; }
-                    const conflicting = Object.values(state.tasks).find(t => t.runId === run.id && t.blueprintVersion === run.blueprintVersion && !terminal(t) && overlaps(selected, taskParts(run, t)));
+                    const existing = Object.values(state.tasks).find(t => t.runId === run.id && t.blueprintVersion === run.blueprintVersion && t.key === idempotencyKey && t.from === name && t.parentId === parent?.id);
+                    if (existing) { if (existing.signature !== signature) throw new Error('同一个 key 对应不同委托；' + conflictHint(existing)); return { taskId: existing.id, status: existing.status, partIds, scope: scopeSummary(scope), ...(parent ? { currentTask: parent } : {}) }; }
+                    if (parent && Object.values(state.tasks).some(t => t.to === args.recipient && t.status === 'running')) throw new Error('接收者仍在执行任务，请等待其空闲或选择其他成员，避免相互等待');
+                    const own = parent ? taskParts(run, parent).flatMap(p => p.cells) : [];
+                    const transferred = new Set(selected.flatMap(p => p.cells.map(c => c.pos.join(','))));
+                    if (parent) {
+                        const ownKeys = new Set(own.map(c => c.pos.join(',')));
+                        if ([...transferred].some(pos => !ownKeys.has(pos))) throw new Error('不能委托自己施工范围以外的方块');
+                    }
+                    const conflicting = Object.values(state.tasks).find(t => t.id !== parent?.id && t.runId === run.id && t.blueprintVersion === run.blueprintVersion && !terminal(t) && overlaps(selected, taskParts(run, t)));
                     if (conflicting) throw new Error('施工范围已有未完成委托；' + conflictHint(conflicting));
-                    if (Object.values(state.claims).some(c => c.runId === run.id && overlaps(selected, claimParts(state, c)))) throw new Error('请释放施工范围租约后再委托');
+                    if (Object.values(state.claims).some(c => (!parent || c.taskId !== parent.id) && c.runId === run.id && overlaps(selected, claimParts(state, c)))) throw new Error('请释放施工范围租约后再委托');
                     const task = { id: randomUUID(), key: idempotencyKey, signature, runId: run.id, blueprintVersion: run.blueprintVersion,
+                        ...(parent ? { parentId: parent.id } : {}),
                         from: name, to: args.recipient, partIds, scope, dependsOn, description, success, status: 'queued', attempt: 0, createdAt: now() };
+                    if (parent) {
+                        for (const [id, claim] of Object.entries(state.claims)) if (claim.taskId === parent.id) delete state.claims[id];
+                        parent.workScope = { positions: own.filter(c => !transferred.has(c.pos.join(','))).map(c => c.pos) };
+                        parent.scopeRevision = (parent.scopeRevision ?? 0) + 1;
+                        leaseTask(state, run, parent, session);
+                    }
                     state.tasks[task.id] = task;
+                    if (parent) report(state, task, 'task_delegated');
                     // 描述里提到的部件若不在生效范围内，执行者会被文字误导去等
                     // 无法写入的层（真实事故：pyr-b2 描述含 part-4/5 但 scope 只有
                     // 底层）。不阻止委托，但让 lead 立即看到矛盾。
                     const mentioned = [...description.matchAll(/part-\d+/gi)].map(m => m[0].toLowerCase());
                     const outside = [...new Set(mentioned)].filter(id => !partIds.includes(id) && known.some(p => p.id === id));
-                    return { taskId: task.id, status: task.status, partIds, scope: scopeSummary(scope),
+                    return { taskId: task.id, status: task.status, partIds, scope: scopeSummary(scope), ...(parent ? { currentTask: parent } : {}),
                         ...(outside.length ? { warning: '描述提到了不在本任务施工范围内的部件 ' + outside.join(', ') +
                             '；这些格不在 workScope 内且不可写入。请让描述与范围一致，或用 scope 扩大委托' } : {}) };
                 }
                 if (method === 'propose_share') {
                     const task = requireTask();
                     if (run.paused) throw new Error('团队工程已暂停');
-                    if (!edgeAllows(run.spec, name, args.recipient, 'message') || !edgeAllows(run.spec, args.recipient, name, 'message') ||
-                        !edgeAllows(run.spec, run.root, args.recipient, 'delegate') || roleOf(run.spec, args.recipient).name !== 'builder') throw new Error('协作需要双方消息连线及 lead 对接收者的委托权限');
+                    if (!edgeAllows(run.spec, name, args.recipient) || !canWork(run.spec, args.recipient)) throw new Error('协作需要双方连线及接收者的施工或委托权限');
+                    if (args.recipient === run.root || ancestorOwns(state, task, args.recipient)) throw new Error('不能转交给正在等待它的上级任务执行者或工程入口');
                     const idempotencyKey = text(args.key, '协作 key', 80);
                     const description = text(args.description, '协作目标'), success = text(args.success, '协作验收标准');
                     let partIds = [...new Set(args.partIds ?? [])];
@@ -473,6 +515,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'assert_write') {
                     requireRun();
+                    if (!capabilities(run.spec, name).canBuild) throw new Error('缺少施工权限');
                     if (run.paused) throw new Error('团队工程已暂停');
                     if (args.blueprintVersion !== run.blueprintVersion) throw new Error('拒绝旧蓝图施工');
                     if (args.taskId) {
@@ -509,8 +552,10 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'reassign') {
                     requireRun(); const task = state.tasks[args.taskId];
-                    if (!task || task.runId !== run.id || (task.from !== name && run.root !== name) || !['blocked', 'queued'].includes(task.status)) throw new Error('只能重派阻塞或排队中的自己的委托');
-                    if (!edgeAllows(run.spec, run.root, args.recipient, 'delegate') || roleOf(run.spec, args.recipient).name === 'inspector') throw new Error('目标没有可用的委托连线或施工能力');
+                    if (!task || task.runId !== run.id || (dispatcher(state, task) !== name && run.root !== name) || !['blocked', 'queued'].includes(task.status)) throw new Error('只能重派阻塞或排队中的自己的委托');
+                    if (!edgeAllows(run.spec, name, args.recipient) || !canWork(run.spec, args.recipient)) throw new Error('目标没有可用的协作连线或施工能力');
+                    if (args.recipient === run.root) throw new Error('不能重派给正在等待它的工程入口');
+                    if (descendantOwns(state, task, args.recipient)) throw new Error('不能把上级任务重派给尚未完成下级任务的成员');
                     let parent = task.parentId && state.tasks[task.parentId];
                     while (parent) {
                         if (parent.to === args.recipient && !terminal(parent)) throw new Error('不能把协作任务派给正在等待它的上级任务执行者');
@@ -522,9 +567,9 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'message') {
                     requireRun();
-                    const recipients = args.recipient ? [args.recipient] : Object.keys(run.spec.agents).filter(to => edgeAllows(run.spec, name, to, 'message'));
+                    const recipients = args.recipient ? [args.recipient] : Object.keys(run.spec.agents).filter(to => edgeAllows(run.spec, name, to));
                     for (const to of recipients) {
-                        if (!edgeAllows(run.spec, name, to, 'message')) throw new Error('画布没有允许此消息的连线');
+                        if (!edgeAllows(run.spec, name, to)) throw new Error('画布没有允许此消息的连线');
                         notify(state, run, name, to, 'message', { text: text(args.text, '消息'),
                             context: { owner: run.owner, origin: run.origin, dimension: run.dimension, request: run.request } });
                     }
@@ -536,6 +581,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     const status = { finish_run: 'completed', cancel_run: 'cancelled', fail_run: 'failed' }[method];
                     if (run?.root === name && run.status === status) return { status }; // lost-response retry
                     requireRun(); if (run.root !== name) throw new Error('只有协调者可以结束工程');
+                    if (method === 'finish_run' && !capabilities(run.spec, name).finishGate) throw new Error('缺少全局验收权限');
                     const tasks = Object.values(state.tasks).filter(t => t.runId === run.id);
                     if (method === 'finish_run' && tasks.some(t => !terminal(t))) throw new Error('仍有未完成子任务');
                     return endRun(state, run, status, method === 'fail_run' ? text(args.reason, '失败原因') : '');

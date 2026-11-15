@@ -1,76 +1,73 @@
-# 团队运行时（第一阶段）
+# 团队运行时：自然语言关系
 
-画布定义可委托、可通信和结果订阅关系；运行时任务记录本次工程的部件分工与依赖。两者分离，用户无需为每次建造重新绘制完整工作流。
+## 当前唯一配置格式
 
-## 运行链路
+控制台和运行时仅接受 `coordination: "relationships"`：连线只有两个端点与 `description`，不选择派单、上报、通信类型。连线是双向协作通道；from/to 只是端点标识，主从、平等或先后顺序由用户的关系说明表达。关系说明原文进入双方的模型指令，不做关键词分类，也不自动增加工具权限。其他成员的关系仍可从团队上下文查看。
 
-1. `console/team-supervisor.js` 校验全部节点 profile 和 LAN 端口，再启动独立 Node 子进程。每个进程有独立 IPC 会话，stdout/stderr 带成员名。
-2. `src/building/team-client.js` 将 agent 工具调用转成 IPC 请求，定期发送心跳、领取就绪任务、处理并确认收件箱消息。API 检测结束前不领取任务。
-3. `src/building/team-runtime.js` 是共享状态的唯一写入者。工程保存启动时的结构快照；蓝图发布、委托、认领、完成、依赖解锁和失效接管均由它校验。
-4. `src/building/team-store.js` 使用 Node 22 内置 SQLite 的事务和 WAL 持久化。活动运行时有进程所有权锁，避免两个控制台同时管理同一目录。大蓝图和部件坐标缓存于运行时，读上下文、收件箱和逐格授权不会每次重写数据库。
-5. `loop-agent.js` 保留观察、规划、行动、检查循环。成员持有完整共享蓝图，施工清单只包含当前自行施工范围；complete_task 验收原始任务范围（包括交给协作者的工作），finish 验收整个工程。
+使用方法：运行 `npm run console`，打开“团队工坊”，载入示例或添加伙伴。拖动头像调整位置，按住 Shift 拖动连接成员；点击连线写关系说明，点击头像在右侧配置权限。内置角色和自定义角色均可编辑权限，改角色名不改变权限。“中心化 / 平等协商 / 层级协作”只填充关系和连线，不修改现有权限。保存后选择“保存并开始新工程”。
 
-## 最小配置
+界面使用晴空/草地配色、方块景观与像素头像，桌面为地图＋侧栏，窄屏为上下布局。权限按能力折叠显示，支持触控拖动、键盘焦点和减少动态效果设置。
+
+## 旧配置的一次性迁移
+
+旧版 delegate / report / message 边和 rules 枚举已从运行时及画布编辑器移除。加载旧文件只显示转换提示，不渲染或执行旧语义连线。点击“转换旧配置”会调用独立导入模块 team-migration.js：同一对成员的旧边合并为一条关系说明，空边旧配置展开为显式互通关系，保留所有成员权限、职责和 profile。转换只是预览，检查后再保存；未知边类型直接报错。
+
+POST /api/team/migrate 只返回转换后的配置和校验结果，不写文件。保存与启动入口只接受新版格式。旧版未结束工程不能按新版规则恢复：选择开始新工程后，其记录会被归档，历史配置、任务和现场建筑保留。已结束旧记录仍可读取。新版工程恢复仍要求成员、关系、职责和权限与快照一致。
+
+## 配置示例
 
 ```json
 {
+  "coordination": "relationships",
   "entryAgent": "lead",
   "agents": {
-    "lead": { "role": "lead", "profile": "andy.json", "position": { "x": 200, "y": 120 } },
-    "alpha": { "role": "builder", "profile": "andy.json", "position": { "x": 100, "y": 280 } },
-    "beta": { "role": "builder", "profile": "andy.json", "position": { "x": 300, "y": 280 } }
+    "lead": { "role": "lead", "profile": "andy.json" },
+    "foreman": {
+      "role": "organizer", "profile": "andy.json",
+      "permissions": {
+        "whitelistOnly": true,
+        "allow": ["delegate_task", "reassign_task", "list_tasks", "send_message", "list_peers", "get_tool_help", "inspect_part", "inspect_build", "get_build_checklist", "inspect_blueprint", "observe_environment", "observe_cells", "move_to", "fly_to", "land_at"],
+        "blueprintAuthority": false, "finishGate": false
+      }
+    },
+    "builder": {
+      "role": "builder", "profile": "andy.json",
+      "permissions": { "deny": ["design_blueprint", "delegate_task", "propose_task_share", "commit_task_share"] }
+    }
   },
   "edges": [
-    { "from": "lead", "to": "alpha", "type": "delegate" },
-    { "from": "lead", "to": "beta", "type": "delegate" },
-    { "from": "alpha", "to": "beta", "type": "message" },
-    { "from": "beta", "to": "alpha", "type": "message" }
-  ],
-  "rules": { "assignment": "lead-assigns", "handoff": "on-part-verified", "finish": "lead-gates" }
+    { "from": "lead", "to": "foreman", "description": "lead 负责整体设计，给 foreman 分配目标和范围；foreman 自行拆分并组织施工，汇总结果后向 lead 汇报。" },
+    { "from": "foreman", "to": "builder", "description": "foreman 安排施工，builder 按范围执行并报告进展；遇到阻碍提供具体坐标，由 foreman 协调。" }
+  ]
 }
 ```
 
-Profile 仍使用现有 `course_responses` 适配器，可以为各节点设置不同模型、参数和职责说明。密钥仍从现有密钥配置读取，不放入画布定义。
+有 `delegate_task` 权限的成员可以对自己的运行中任务继续委托。无施工权限的组织者也能接收范围任务，再分配给下级。子任务范围必须包含在父任务当前 `workScope` 内；事务创建子任务、缩小父任务自行施工范围并更新租约。父任务原始 scope 和验收义务保持不变。依赖不得形成循环等待，不能派回仍在等待的上级；父任务须等待子任务完成，再核验原始完整范围。`delegate_task` 的稳定 key 在新版按发起者和父任务隔离，超时重试不会重复转交范围。
 
-## 委托与恢复
+任务结果自动通知工程入口、发起者和任务祖先；其他关系中的主动汇报由模型通过消息完成。子任务继续委托时，接收者不能正在执行另一任务，避免成员相互等待；相同派单的幂等重试不受此限制。故障接管按当前父任务执行者的连线选择成员，不再要求所有下级都直连入口。重启后保留任务树与范围划分，旧令牌失效。关系、职责与权限修改需开始新工程；恢复时会检查它们与工程快照一致。
 
-“载入中心化示例”默认由 leader 自主分工（rules.assignment=lead-assigns）。蓝图设计后不会自动切分或派单，旧 spatial-parallel 配置也不再触发自动分区。示例含两名 builder，成员可增减。leader 根据现场支撑、通行、工作量和进展决定分模块、同模块合作或先后施工，不预设左右分区。
+运行时独立检查派单、交接、通信、设计等权限。自然语言不能绕过权限、租约或验收；空连线集合不会隐式开放全员互通。运行时不解析“审批”“投票”等文字为强制规则：模型可以协商，施工顺序可登记为 `dependsOn`，但独立审批门、投票协议、无蓝图的通用任务和公共抢单池尚未实现。本版仍由入口接收整体目标、发布唯一共享蓝图并完成工程最终验收；其他成员的设计/验收能力位不能把这些工程级职责转移走。
 
-`delegate_task` 可用 scope.region={min,max} 选择模块内的方块，或用 scope.positions 指定任意坐标。默认世界坐标，也支持 coordinateSpace=blueprint 相对设计原点。省略 scope 表示完整模块。多个任务可以共享 partId，但实际施工范围不能重叠；派单不会修改模块名称、蓝图几何和版本。施工建议、租约和逐格写权限均按任务范围检查，部分范围不能切开相连的床、门或双格植物。
+验证：`node scripts/test-relationship-teams.mjs` 覆盖关系配置、权限拒绝、三层委托、范围转交、循环依赖、IPC/checkpoint、恢复、重启和画布转换；已加入 `npm run test:team`。`npm test` 覆盖完整离线回归；`npm run test:console-ui` 使用隔离的无头 Edge/Chrome 和模拟 API 验证页面、拖动保存、关系编辑、权限和迁移，截图写入 `.tmp-codex-relations/`。可设置 `BROWSER_BIN` 指定浏览器路径。这些测试不会启动 Minecraft 或请求真实模型，关系说明的实际理解效果仍需联调。
 
-builder 局部协作采用明确交接：
+## 执行与持久化
 
-1. propose_task_share 提出自己施工范围内的方块、接收者、目标和验收标准。双方需有消息线，lead 对接收者需有委托权限。
-2. 接收者用 respond_task_share 接受或拒绝。接受不授予施工权限；空闲回合结束后等待正式任务。
-3. 发起者在动作之间调用 commit_task_share，在一个事务中缩小自己的 workScope、调整租约并派发协作任务。接收者需先完成现有任务，重复提交不会重复派单。
+- console/team-supervisor.js 校验配置和 profile，为每个成员启动独立 Node 子进程。
+- team-client.js 通过 IPC 请求共享运行时，每两秒心跳；成员只领取自己的就绪任务。
+- team-runtime.js 是共享状态的唯一写入者。工程保存关系快照，任务保存具体范围、父子关系和依赖。
+- team-store.js 使用 Node 22 内置 SQLite 的事务和 WAL，进程所有权锁防止两个控制台同时管理同一目录。
+- loop-agent.js 保留观察、计划、行动和检查循环；关系说明影响决策，运行时独立验证权限和执行结果。
 
-原任务的目标和 scope 保持不变，只缩小自行施工的 workScope。原执行者可以继续施工或 wait_for_team；必须等协作任务完成并验收完整原范围后才能 complete_task。原执行者或 lead 可重派阻塞的协作任务，但不能交给正在等待它的上级任务执行者。尚未交接的提案在原任务结束、租约失效或控制台重启时过期，需用新 key 协商；已交接的范围与任务持久保存。
+## 范围、交接和恢复
 
-prepare_parallel_build 保留为可选工具，只有 leader 主动调用才按 X/Z 切分模块并派单。该工具需要 2–8 名 builder、独立支撑、清理好的场地，以及没有未结束任务或租约。一般使用 scope 派单即可保持模块结构，无需切分。
+delegate_task 必填 key、recipient、partIds、description、success；可选 scope 和 dependsOn。scope 可用世界坐标 region/positions，也支持 coordinateSpace=blueprint。省略 scope 表示完整部件；部分范围不得切开床、门或双格植物。多个任务可以使用同一 partId，但自行施工范围必须互斥。
 
-中心化预设包含 lead 与 builder、builder 之间的消息线。空闲成员可以观察、让路、回复，以及查看和回应协作提案；该回合禁止直接施工、设计和结束工程。成员结束施工前应移出工作区域。最终建筑与预期空位仍由 lead 全局验收。画布下方显示模块与自行施工范围、任务依赖、协作来源和提案状态。
+协商式交接依次调用 propose_task_share、respond_task_share、commit_task_share。双方需相连，且具有相应工具权限；接受提案本身不授予写权限。正式提交在事务中转交范围，接收者需先结束当前任务。过期租约、父任务结束或控制台重启会使尚未交接的提案失效；已提交范围持久保存。
 
-计划中的已有 `requirements`（包括 `goal`）由系统保留原文。模型重述旧需求时，返回保留提示并接受有效步骤更新，不再拒绝整份计划；进度应填写在步骤的 `status/evidence`。子任务的 `ORIGINAL_GOAL` 与背景 `TEAM_GOAL` 分开，施工清单总数、剩余数和下一部件只统计分配范围。新步骤省略 `depends_on` 表示无依赖，不再隐式依赖上一步。
+任务依次经历 queued、running、completed；失败进入 blocked，取消进入 cancelled。领取时授予令牌与默认 15 秒租约，任务结果和收件箱支持重试/确认。任务超时未领取会通知分配者；在线不代表 canAcceptTask。用户主动暂停的成员不会被擅自恢复。
 
-`delegate_task` 参数为 key、recipient、partIds、description、success，可选 scope、coordinateSpace 和 dependsOn。同一工程和版本内，相同 key 与内容返回原任务，不同内容被拒绝。依赖只能引用已存在的同版本任务。
+子任务以 complete_task 完成，程序检查其原始范围与现场证据；工程入口以 finish 验收全部蓝图与空位。蓝图存在未结束任务或租约时不能直接修订。工程取消或令牌失效后，后续物理写入被拒绝，已发送到 Minecraft 的操作可能先完成。
 
-任务经历 `queued → running → completed`，失败进入 `blocked`，用户取消进入 `cancelled`。只有现场检查证明各部件无差异且成员计划完成，循环才允许 `complete_task`。语义验收仍由模型负责；程序负责方块与范围验证。
+prepare_parallel_build 是入口的可选工具，需要 2–8 名有施工权限且相连的成员、独立支撑、已清理场地及没有未结束任务或租约。它不是自动调度器，通常直接按 scope 分工即可。
 
-成员心跳分别上报状态和 `canAcceptTask`，在线不代表可接单；这些字段通过团队上下文提供给 leader。空闲交流回合自动停止后进入 blocked，可领取正式委托；显式暂停保持暂停。`reassign_task` 重派原任务，保留任务 ID 和施工范围，返回接收者就绪状态；重复派单错误会给出原任务 ID 和重派提示。
-
-依赖满足且工程未暂停时，queued 任务超过默认 15 秒未领取会触发一次 `task_unclaimed` 事件，带原任务 ID、接收者状态及恢复提示，并标记 `claimStalled`。此事件唤醒正在等待的 leader，不会自动恢复被用户暂停的成员，也不修改现场。重派或重新领取会清除标记；同次派单不会重复通知。离线任务自动接管只选择明确可接单的成员。
-
-领取任务时发放带执行令牌的部件租约。成员每两秒发送心跳，默认租约有效期 15 秒；启动等待不视为失联。跨进程消息投递采用持久收件箱与确认机制，循环记录近期事件 ID 避免重放；任务结果可重试。进程退出或租约失效后，任务重新入队并尝试交给连线允许的其他施工成员。接管者重新读取现场，已存在的正确方块不会重复放置。
-
-控制台重启后，之前的执行令牌全部作废。任务队列和蓝图保留；协调者通过自己的 checkpoint 恢复，用户发送“继续”。成员重新领取任务，使用新令牌。运行中的蓝图不能直接改版，须先结束相关子任务并释放租约。工程取消后，后续物理操作授权被拒绝；已经发送到 Minecraft 的操作可能先完成。
-
-## 本阶段边界
-
-- 支持一个协调者分配整体任务，builder 在已有任务内协商局部交接；任意层级的自主工程规划、独立验收任务和可编程触发器尚未实现。
-- 支持节点 profile、职责、位置与实时状态；保留原 SVG 画布，尚未迁移 React Flow，也没有缩放、撤销或子图模板。
-- 成员身份仍使用 Minecraft 名称；稳定 UUID 与无 Minecraft 实体的纯规划节点留待下一阶段。
-- 当前支持建造蓝图内的并行施工与显式清理；独立拆除工程仍建议使用单 agent 模式。
-- 分工和施工顺序由 agent 决定，运行时保证范围排他、依赖等待和验收。空间切分工具可以选用，但不强制；语义要求仍需模型理解与最终核查。
-- 已通过离线多进程测试；还需要在实际 Minecraft 世界中验证连通性、移动冲突、加载距离和服务器延迟。
-
-运行环境需要 Node 22.13 或更高的 22.x 版本（使用内置 SQLite，无需额外安装数据库依赖）。验证命令：`npm run test:team`。完整回归：`npm test`。
+运行环境：Node 22.13 或更高的 22.x，使用内置 SQLite。

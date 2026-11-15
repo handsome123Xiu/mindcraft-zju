@@ -121,6 +121,10 @@ const server = createServer(async (request, response) => {
             response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             return response.end(await readFile(indexHtml, 'utf8'));
         }
+        if (request.method === 'GET' && path === '/styles.css') {
+            response.writeHead(200, { 'content-type': 'text/css; charset=utf-8' });
+            return response.end(await readFile(join(root, 'console', 'styles.css'), 'utf8'));
+        }
         if (request.method === 'GET' && path === '/api/status') {
             return json(response, 200, { running: !!(agent && agent.exitCode == null) || teamSupervisor.running(), pid: agent?.pid ?? null, team: teamSupervisor.running() });
         }
@@ -169,6 +173,12 @@ const server = createServer(async (request, response) => {
             const spec = await readTeamSpec(join(root, 'bots'));
             const claims = teamSupervisor.running() ? { claims: teamSupervisor.snapshot().claims } : await readClaims(join(root, 'bots'));
             return json(response, 200, { spec, validation: spec ? validateTeamSpec(spec) : { ok: true, errors: [] }, claims });
+        }
+        if (request.method === 'POST' && path === '/api/team/migrate') {
+            const { migrateTeamSpec } = await import(moduleUrl('src/building/team-migration.js'));
+            const { validateTeamSpec } = await import(moduleUrl('src/building/team-state.js'));
+            const spec = migrateTeamSpec((await readBody(request)).spec);
+            return json(response, 200, { spec, validation: validateTeamSpec(spec) });
         }
         if (request.method === 'POST' && path === '/api/team') {
             const { validateTeamSpec, TEAM_PRESETS } = await import(moduleUrl('src/building/team-state.js'));

@@ -50,10 +50,11 @@
     "clean:modules": "node -e \"const fs=require('fs');const p=require('path');['node_modules','package-lock.json'].forEach(f=>{if(fs.existsSync(f)){if(fs.lstatSync(f).isDirectory()){fs.rmSync(f,{recursive:true,force:true});}else{fs.unlinkSync(f);}}});\"",
     "setup": "node scripts/setup-local.mjs",
     "test": "node scripts/test-building.mjs && node scripts/test-placement-actions.mjs && node scripts/test-block-actions.mjs && node scripts/test-building-loop.mjs && node scripts/test-observation-choice.mjs && node scripts/test-building-recovery.mjs && node scripts/test-construction-checklist.mjs && node scripts/test-chat-agent.mjs && npm run test:team && node scripts/test-api-check.mjs && node scripts/test-deepseek-responses.mjs && node scripts/test-decision-context.mjs && node scripts/test-agent-regressions.mjs && node scripts/test-token-usage.mjs && node scripts/test-navigation.mjs && node scripts/test-flight-actions.mjs && node scripts/test-planning.mjs && node scripts/test-creative-items.mjs",
-    "test:team": "node scripts/test-peer-actions.mjs && node scripts/test-team-actions.mjs && node scripts/test-parallel-building.mjs && node scripts/test-task-sharing.mjs && node scripts/test-team-runtime.mjs && node scripts/test-team-lifecycle.mjs && node scripts/test-coordinator-waiting.mjs && node scripts/test-team-recovery.mjs",
+    "test:team": "node scripts/test-peer-actions.mjs && node scripts/test-team-actions.mjs && node scripts/test-parallel-building.mjs && node scripts/test-task-sharing.mjs && node scripts/test-relationship-teams.mjs && node scripts/test-team-migration.mjs && node scripts/test-team-runtime.mjs && node scripts/test-team-lifecycle.mjs && node scripts/test-coordinator-waiting.mjs && node scripts/test-team-recovery.mjs",
     "test:building": "node scripts/test-building.mjs && node scripts/test-placement-actions.mjs && node scripts/test-block-actions.mjs && node scripts/test-building-loop.mjs && node scripts/test-observation-choice.mjs && node scripts/test-building-recovery.mjs && node scripts/test-construction-checklist.mjs && node scripts/test-chat-agent.mjs && node scripts/test-peer-actions.mjs && node scripts/test-team-actions.mjs && node scripts/test-api-check.mjs && node scripts/test-token-usage.mjs && node scripts/test-navigation.mjs && node scripts/test-flight-actions.mjs",
     "check:setup": "node scripts/check-setup.mjs",
-    "check:publish": "node scripts/check-publish.mjs"
+    "check:publish": "node scripts/check-publish.mjs",
+    "test:console-ui": "node scripts/test-console-ui.mjs"
   },
   "devDependencies": {
     "patch-package": "^8.0.0"

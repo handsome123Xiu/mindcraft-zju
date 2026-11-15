@@ -94,7 +94,11 @@ export function createTeamClient({ name, spec, channel = process, onError = erro
             job.teamContext = context;
         },
         publish: (job, assignment, design) => send('publish', { ...scope(job), previousVersion: job.assignmentVersion, assignment, design }),
-        delegate: (job, args) => send('delegate', { ...scope(job), ...args }),
+        async delegate(job, args) {
+            const { currentTask, ...result } = await send('delegate', { ...scope(job), ...args });
+            if (currentTask) job.teamTask = currentTask;
+            return result;
+        },
         proposeShare: (job, args) => send('propose_share', { ...scope(job), ...args }),
         respondShare: (job, args) => send('respond_share', { ...scope(job), ...args }),
         async commitShare(job, args) {

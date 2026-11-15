@@ -1,5 +1,5 @@
 import { bounds, coordinates, prepareAssignment, MATERIALS } from './blueprint.js';
-import { actionAllowed, roleOf } from './team-state.js';
+import { actionAllowed, roleOf, capabilities, edgeAllows } from './team-state.js';
 import { inspectCells } from './inspection.js';
 import { compilePlacement, executePlacement, PLACEMENT_ACTIONS } from './placement-actions.js';
 import { ACTION_SCHEMAS, TOOL_SCHEMAS, validateToolArgs } from './action-protocol.js';
@@ -13,12 +13,12 @@ import { partitionBuilding, verifyParallelSite } from './parallel-building.js';
 export const TOOL_CATALOG = Object.freeze([
     { name: 'get_tool_help', description: 'Read exact arguments and usage for a named tool. Read-only; grants no additional permissions.' },
     { name: 'prepare_parallel_build', description: 'OPTIONAL coordinator tool for a site where X/Z strips make sense: split blueprint metadata into vertical zones and dispatch builders. Never automatic or mandatory. Usually prefer delegate_task with whole modules or chosen scope, preserving module identities. Requires no unfinished tasks/leases and clear independent supports. Final global verification stays with lead.' },
-    { name: 'delegate_task', description: 'Coordinator assigns a whole module or a chosen subset of modules. Optional scope={region:{min,max}} selects intersecting module cells; scope={positions:[[x,y,z],...]} selects exact cells. coordinateSpace defaults to world; blueprint uses design.origin. Multiple workers may share the same partId with NON-OVERLAPPING scopes. Omit scope for whole modules. Supply stable key, recipient, partIds, description, success; dependsOn contains real support/order task IDs. Dispatch independent tasks before waiting.' },
-    { name: 'propose_task_share', description: 'Builder proposes sharing part of its CURRENT owned work with a teammate. Supply stable key, recipient, partIds, explicit scope (region or positions), coordinateSpace, description and success. Requires mutual message links and lead delegation authority to the helper. Does NOT transfer writes yet. Teammate must respond_task_share, then YOU commit_task_share between actions. Keep original goal; shared work remains part of your final responsibility.' },
+    { name: 'delegate_task', description: 'Assign a whole module or selected cells. Permitted task holders can delegate ONLY their current workScope to connected members; this atomically transfers writes, shrinks their local workScope, and creates a child task. Parent completion still verifies the original full scope. Optional scope={region:{min,max}} or {positions:[[x,y,z],...]}; omit for whole modules. coordinateSpace defaults to world; blueprint uses design.origin. Use disjoint scopes and a stable key for retries. Supply recipient, partIds, description, success; dependsOn uses returned task IDs, never ancestors or tasks waiting for you.' },
+    { name: 'propose_task_share', description: 'Propose sharing part of your CURRENT workScope with a connected capable teammate. Supply stable key, recipient, partIds, explicit scope (region or positions), coordinateSpace, description and success. Does NOT transfer writes yet. Teammate must respond_task_share, then YOU commit_task_share between actions. Keep original goal; shared work remains part of your final responsibility.' },
     { name: 'respond_task_share', description: 'Accept or decline a proposal addressed to you using proposalId and accept. Inspect list_tasks proposals first. Acceptance does not start construction: finish this conversation with end_turn and wait for a runtime assignment. Do not accept work you cannot take.' },
     { name: 'commit_task_share', description: 'Original builder commits an accepted proposal between physical actions. Atomically releases the chosen cells from your local work and queues a scoped task for the available helper. Original goal is unchanged; complete_task waits for helpers and verifies your full original scope. Retry the same proposalId after a lost response. Use list_tasks and wait_for_team to follow results.' },
     { name: 'list_tasks', description: 'Read the current shared task queue, results and dependencies. Use wait_for_team while tasks execute; avoid polling in a model loop.' },
-    { name: 'reassign_task', description: 'Reassign your blocked or queued task to a worker connected by a delegate edge. Running tasks cannot be reassigned until stopped.' },
+    { name: 'reassign_task', description: 'Reassign your existing blocked or queued task to a connected capable member. Running tasks cannot be reassigned until stopped. Never reassign to an ancestor waiting on it or to an unfinished descendant.' },
     { name: 'send_message', args: '{text:"消息内容",recipient?:"玩家名或其他agent名"}',
         description: 'Send a private message to the requesting user (default), another player in this conversation, or a teammate agent (delivery is direct when online, queued to its mailbox otherwise). Reply, ask a clarification question, report progress or coordinate work. Does not finish the task. No blueprint or creative mode required.' },
     { name: 'broadcast', args: '{text:"消息内容"}',
@@ -235,8 +235,8 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
     async function prepareParallel(args = {}) {
         if (!team?.runtime || !roleOf(team.spec(), team.self).blueprintAuthority || job.teamTask) throw new Error('只有团队协调者可以准备并行施工');
         const spec = team.spec();
-        const workers = Object.keys(spec.agents).filter(name => name !== team.self && spec.agents[name].role === 'builder' &&
-            (!spec.edges?.length || spec.edges.some(edge => edge.from === team.self && edge.to === name && edge.type === 'delegate')));
+        const workers = Object.keys(spec.agents).filter(name => name !== team.self && capabilities(spec, name).canBuild &&
+            edgeAllows(spec, team.self, name));
         // Persist the request key/version before RPC; a lost response can safely
         // retry the same atomic publication, without creating duplicate tasks.
         const request = job.parallelRequest ?? { key: 'parallel-v' + job.assignmentVersion,
@@ -280,11 +280,13 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
         refreshChecklist() { snapshot(); return refreshChecklist(job, world); },
         async useSkill(name, args, signal) {
             if (job.teamCoordination) throw new Error('队友协调回合不能设计或修改建筑');
+            if (team?.runtime && job.teamTask) throw new Error('子任务共享已有蓝图，请向团队入口提出设计修改');
             if (name !== 'design_blueprint') throw new Error('未知 skill：' + name);
             if (team?.spec() && !roleOf(team.spec(), team.self).blueprintAuthority) {
                 throw new Error('团队模式下蓝图由 lead 统一设计并共享；' + roleOf(team.spec(), team.self).name +
                     ' 角色不能调用 design_blueprint。请与 lead 协调蓝图变更');
             }
+            teamGate(name);
             if (job.siteIssue) throw new Error('施工位置尚需确认：' + job.siteIssue);
             if (job.demolition) throw new Error('本任务已有拆除目标，不能通过新建蓝图替代拆除验收');
             snapshot();
@@ -374,7 +376,12 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             }
             if (['delegate_task', 'list_tasks', 'reassign_task'].includes(name)) {
                 if (!team?.runtime) throw new Error('请从控制台启动团队后使用协作任务');
-                if (name === 'delegate_task') return team.delegate(job, args);
+                if (name === 'delegate_task') {
+                    const result = await team.delegate(job, args);
+                    refreshChecklist(job, world);
+                    await checkpoint();
+                    return result;
+                }
                 if (name === 'reassign_task') return team.reassign(job, args);
                 await team.refresh(job);
                 return { status: 'observed', ...job.teamContext };

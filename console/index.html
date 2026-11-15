@@ -4,75 +4,53 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mindcraft 建筑代理控制台</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #121417; color: #e4e7eb; }
-  header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; background: #1a1e24; border-bottom: 1px solid #2a2f37; }
-  header h1 { font-size: 17px; margin: 0; }
-  header .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
-  header .dot.on { background: #2ecc71; box-shadow: 0 0 6px #2ecc71; }
-  header .pid { color: #8b939e; font-size: 12px; }
-  nav { display: flex; gap: 4px; padding: 0 24px; background: #1a1e24; border-bottom: 1px solid #2a2f37; }
-  nav button { background: none; border: none; color: #9aa3ad; padding: 10px 16px; font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; }
-  nav button.active { color: #fff; border-bottom-color: #4f9cf9; }
-  main { padding: 24px; max-width: 1100px; margin: 0 auto; }
-  section { display: none; }
-  section.active { display: block; }
-  .card { background: #1a1e24; border: 1px solid #2a2f37; border-radius: 10px; padding: 18px; margin-bottom: 16px; }
-  .card h2 { margin: 0 0 12px; font-size: 15px; }
-  label { display: block; font-size: 13px; color: #9aa3ad; margin: 10px 0 4px; }
-  input, select, textarea { width: 100%; background: #121417; border: 1px solid #2a2f37; border-radius: 6px; color: #e4e7eb; padding: 8px 10px; font-size: 14px; font-family: inherit; }
-  textarea { font-family: Consolas, monospace; }
-  button.primary { background: #2563eb; border: none; color: #fff; border-radius: 6px; padding: 9px 18px; font-size: 14px; cursor: pointer; }
-  button.danger { background: #b3392f; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  .row { display: flex; gap: 12px; }
-  .row > * { flex: 1; }
-  #log { background: #0d0f12; border: 1px solid #2a2f37; border-radius: 8px; padding: 10px; height: 420px; overflow-y: auto; font-family: Consolas, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
-  #log .t { color: #5b636d; }
-  #log .err { color: #ff7b72; }
-  #log .chat { color: #7ee787; }
-  #log .model { color: #79c0ff; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #2a2f37; vertical-align: top; }
-  th { color: #8b939e; font-weight: 600; cursor: pointer; user-select: none; }
-  td.name { color: #79c0ff; font-family: Consolas, monospace; white-space: nowrap; }
-  td.desc { color: #b8bfc8; }
-  .filter { margin-bottom: 10px; }
-  .badge { display: inline-block; background: #21262e; border: 1px solid #2a2f37; border-radius: 10px; padding: 1px 8px; font-size: 11px; color: #8b939e; margin-right: 4px; }
-  .ok { color: #2ecc71; }
-  .muted { color: #8b939e; font-size: 12px; }
-  .toast { position: fixed; bottom: 24px; right: 24px; background: #1f4d33; color: #b7f5d3; border: 1px solid #2ecc71; padding: 10px 18px; border-radius: 8px; display: none; }
-</style>
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <header>
-  <span class="dot" id="dot"></span>
-  <h1>Mindcraft 建筑代理控制台</h1>
-  <span class="pid" id="pidText">未运行</span>
+  <span class="brand-cube" aria-hidden="true"></span>
+  <h1>MINDCRAFT</h1><span class="brand-caption">一起创造，多一点想象</span>
+  <div class="connection"><span class="dot" id="dot"></span><span class="pid" id="pidText">未运行</span></div>
 </header>
-<nav>
-  <button data-tab="control" class="active">控制</button>
-  <button data-tab="settings">设置</button>
-  <button data-tab="profilesTab">Profiles</button>
-  <button data-tab="catalogTab">动作 / 工具 / Skills</button>
-  <button data-tab="teamTab">团队协作</button>
+<div class="workspace-hero">
+  <div class="hero-copy"><div class="eyebrow">A LITTLE TEAM. A BIG WORLD.</div>
+    <h2>把想法，搭成一个世界。</h2><p>召集你的方块伙伴，连起默契，让创造发生。</p></div>
+  <svg class="world-scene" viewBox="0 0 390 172" aria-hidden="true" shape-rendering="crispEdges">
+    <path d="M20 27h24V16h42v11h21v13H20zM257 39h25V27h43v12h26v12h-94z" fill="#ffffff" opacity=".85"/>
+    <path d="M28 143v-25h25V97h24v21h25V88h24v-23h25v23h22v55z" fill="#c8dfcc"/>
+    <path d="M244 143v-27h19V92h24v24h23V74h24v22h26v47z" fill="#b8d3c0"/>
+    <path d="M79 128l122-38 127 38-127 39z" fill="#8daf62"/>
+    <path d="M79 128v23l122 38v-22z" fill="#a8815b"/><path d="M201 167l127-39v23l-127 38z" fill="#8b6748"/>
+    <path d="M79 128l122 39v9L79 137z" fill="#618e42"/><path d="M201 167l127-39v9l-127 39z" fill="#4d7834"/>
+    <path d="M174 100l42-13 42 13-42 13z" fill="#e9d5a8"/><path d="M174 100v34l42 13v-34z" fill="#d7bb84"/><path d="M216 113l42-13v34l-42 13z" fill="#b99b69"/>
+    <path d="M167 100l49-43 49 43-49 15z" fill="#cf8b69"/><path d="M216 57l49 43-49 15z" fill="#b66f53"/>
+    <path d="M188 116l13 4v16l-13-4z" fill="#759da0"/><path d="M228 120l14-4v23l-14 4z" fill="#775b3e"/>
+    <path d="M123 90v42l11 3V90z" fill="#9b794f"/><path d="M103 60l28-9 29 9v31l-29 9-28-9z" fill="#77a64b"/><path d="M131 69l29-9v31l-29 9z" fill="#5f8939"/><path d="M103 60l28-9 29 9-29 9z" fill="#96bc65"/>
+    <path d="M279 113v23l7 2v-25z" fill="#9b794f"/><path d="M265 90l18-6 19 6v20l-19 6-18-6z" fill="#8eb759"/><path d="M283 96l19-6v20l-19 6z" fill="#739747"/>
+    <path d="M155 132h5v5h-5zM166 143h4v4h-4z" fill="#fff4ca"/><path d="M153 130h5v5h-5zM164 141h4v4h-4z" fill="#e8bd60"/>
+  </svg>
+</div>
+<nav aria-label="工作台导航">
+  <button data-tab="teamTab" class="active"><span class="nav-icon">▦</span>团队工坊</button>
+  <button data-tab="control"><span class="nav-icon">▷</span>启动与日志</button>
+  <button data-tab="profilesTab"><span class="nav-icon">♙</span>伙伴档案</button>
+  <button data-tab="settings"><span class="nav-icon">⚙</span>世界设置</button>
+  <button data-tab="catalogTab"><span class="nav-icon">◇</span>能力图鉴</button>
 </nav>
 <main>
-  <section id="control" class="active">
+  <section id="control">
     <div class="card">
       <h2>启动 Agent</h2>
       <div class="row">
-        <div><label>Profile（默认取 settings.profiles[0]）</label><select id="profileSelect"></select></div>
-        <div><label>机器人名（默认取 profile.name）</label><input id="botName" placeholder="ZhiXiu"></div>
+        <div><label>伙伴档案</label><select id="profileSelect"></select></div>
+        <div><label>伙伴名字</label><input id="botName" placeholder="ZhiXiu"></div>
         <div><label>Minecraft 端口（LAN 端口）</label><input id="mcPort" type="number" placeholder="51234"></div>
       </div>
       <p style="margin-top:14px">
-        <button class="primary" id="startBtn">启动</button>
-        <button class="primary danger" id="stopBtn" disabled>停止</button>
+        <button class="primary" id="startBtn">▶ 开始冒险</button>
+        <button class="danger" id="stopBtn" disabled>停止</button>
       </p>
-      <p class="muted">启动即运行 main.js 子进程；日志实时显示在下方。端口留空则使用 settings 中的配置；单人世界请填写“对局域网开放”时显示的端口。</p>
+      <p class="muted">连接你的 Minecraft 世界，伙伴上线后就可以接收任务。单人世界请填写“对局域网开放”时显示的端口。</p>
     </div>
     <div class="card">
       <h2>实时日志</h2>
@@ -97,7 +75,7 @@
         <div><label>chat_ingame</label><select data-setting="chat_ingame"><option>true</option><option>false</option></select></div>
       </div>
       <p style="margin-top:14px"><button class="primary" id="saveSettings">保存设置</button>
-      <span class="muted">保存后对下次启动生效（端口等运行时参数在“控制”页覆盖）。</span></p>
+        <span class="muted">保存后对下次启动生效（端口等运行时参数在“控制”页覆盖）。</span></p>
     </div>
   </section>
 
@@ -113,88 +91,89 @@
     </div>
   </section>
 
-  <section id="teamTab">
+  <section id="teamTab" class="active">
     <div class="card">
-      <h2>团队画布</h2>
+      <div class="section-heading"><div><h2>你的协作小队</h2><p>一条连线，一份默契。让伙伴找到各自的位置。</p></div><div class="mini-stats"><span><strong id="memberCount">0</strong>伙伴</span><span><strong id="relationCount">0</strong>关系</span><span><strong id="activeTaskCount">0</strong>进行中</span></div></div>
       <div class="row" style="align-items:center; flex-wrap:wrap; margin-bottom:12px">
         <div style="flex:0 0 auto"><button class="primary" id="loadCentralizedExample">载入中心化示例</button></div>
-        <div class="muted">中心 agent 负责蓝图、动态分工和最终验收；施工成员可分模块建造，也可协商共同完成一个模块。示例含 2 名 builder，成员数量和连线均可编辑。</div>
+        <div class="muted">连接成员，用自然语言描述双方如何配合，再分别配置权限。Agent 据此协商、分工和交接；本版由入口发布共享蓝图并完成全局验收。</div>
       </div>
-      <div class="row" style="align-items:flex-end">
+      <div class="row team-toolbar" style="align-items:flex-end">
         <div><label>新成员名</label><input id="newAgentName" placeholder="beta"></div>
         <div style="flex:0"><button class="primary" id="addAgentBtn">添加成员</button></div>
-        <div><label>施工分工</label><select id="teamAssignment"><option value="lead-assigns">由 leader 自主分工</option><option value="first-claim">保留认领配置</option></select></div>
-        <div style="flex:2"><label>预设模板（按画布现有成员生成）</label>
+        <div style="flex:2"><label>预设模板（空画布自动添加三位伙伴）</label>
           <div style="display:flex; gap:8px">
             <button class="primary" data-preset="centralized">中心化</button>
-            <button class="primary" data-preset="peers">开放通信</button>
+            <button class="primary" data-preset="peers">平等协商</button>
+            <button class="primary" data-preset="hierarchy">层级协作</button>
           </div>
         </div>
       </div>
-      <p><button class="primary" id="startTeam">保存并开始新测试</button> <button id="resumeTeam">恢复旧工程</button> <button id="stopTeam" disabled>停止团队</button>
+      <p class="team-actions"><button class="primary" id="startTeam">▶ 保存并开始新工程</button> <button id="resumeTeam">继续已有工程</button> <button class="danger" id="stopTeam" disabled>停止团队</button>
         <span id="teamStatus" class="muted">使用“控制”页的 LAN 端口；未单独配置 profile 的成员使用默认 profile。</span></p>
-      <p class="muted">新测试结束旧工程并释放任务，保留日志和现场建筑，可使用新的成员与连线。恢复旧工程需保持原结构。</p>
-      <div id="canvasWrap" style="position:relative; margin-top:12px; border:1px solid #2a2f37; border-radius:8px; background:#0d0f12; height:440px; overflow:hidden">
+      <p class="muted">新测试结束旧工程并释放任务，保留日志和现场建筑。恢复旧工程需保持原成员、关系说明和权限。</p>
+      <div id="migrationBanner" class="migration-banner" hidden><p>发现旧版团队配置。先转换关系说明并检查权限，再开始新工程。已有工程记录和现场建筑会保留。</p><button id="convertRelationships">转换旧配置</button></div>
+<div class="workbench"><div class="canvas-column"><div class="canvas-topline">协作地图<span>OVERWORLD / TEAM SPACE</span></div>      <div id="canvasWrap">
         <svg id="teamCanvas" width="100%" height="100%">
-          <defs>
-            <marker id="arrow-delegate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4f9cf9"/></marker>
-            <marker id="arrow-report" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2ecc71"/></marker>
-            <marker id="arrow-message" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8b939e"/></marker>
-          </defs>
+          <defs></defs>
         </svg>
-        <div id="canvasLegend" style="position:absolute; top:8px; left:12px; display:flex; gap:12px; font-size:11px; color:#8b939e; pointer-events:none">
-          <span>⬤ lead</span><span style="color:#8b939e">⬤ builder</span><span style="color:#2ecc71">⬤ inspector</span>
-          <span style="color:#4f9cf9">— delegate 派单</span>
-          <span style="color:#2ecc71">— report 上报</span>
-          <span>— message 私聊</span>
-        </div>
+        <div id="canvasLegend"></div>
         <div id="canvasHint" class="muted" style="position:absolute; left:12px; bottom:8px; pointer-events:none">
-          拖动头像移动 · 从节点外环拖出连线 · 点击节点/连线编辑 · 双击空白添加成员 · Delete 删除 · Ctrl+S 保存
+          拖动移动 · 按住 Shift 拖动连线 · 点击编辑 · 双击添加 · Delete 删除
         </div>
-        <div id="emptyState" style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:#5b636d">
-          <div style="font-size:15px">画布还是空的</div>
-          <div style="font-size:13px">点击上方“载入中心化示例”快速开始，也可添加成员或双击画布</div>
+        <div id="emptyState"><div class="empty-block" aria-hidden="true"></div><strong>第一位伙伴，正等着加入</strong><div>载入一个示例，或双击空白处添加伙伴</div>
         </div>
       </div>
-      <div class="row" style="margin-top:10px">
-        <div><label>选中成员角色</label>
-          <select id="roleSelect">
-            <option value="lead">lead（蓝图权威 + 全局验收）</option>
-            <option value="builder">builder（施工，禁设计）</option>
-            <option value="inspector">inspector（只读巡检）</option>
-          </select>
+
+</div><aside class="inspector"><div class="inspector-head">伙伴与关系<span>点击头像配权限，点击连线写默契</span></div>      <div class="row" style="margin-top:12px">
+        <div style="flex:2"><label>伙伴角色名称</label>
+          <input id="roleInput" list="roleList" placeholder="lead / builder / inspector / 自定义…">
+          <datalist id="roleList">
+            <option value="lead">蓝图权威 + 全局验收</option>
+            <option value="builder">施工，禁设计</option>
+            <option value="inspector">只读巡检</option>
+          </datalist>
         </div>
-        <div><label>选中连线类型</label>
-          <select id="edgeTypeSelect">
-            <option value="delegate">delegate（派单，蓝）</option>
-            <option value="report">report（完工上报，绿）</option>
-            <option value="message">message（私聊，灰）</option>
-          </select>
-        </div>
+        <div><label>关系昵称</label><input id="edgeLabel" maxlength="20" placeholder="可选"></div>
         <div style="flex:0; display:flex; align-items:flex-end; gap:8px">
-          <button class="primary" id="applyCanvas">校验并保存<span id="dirtyDot" style="display:none; margin-left:6px; width:8px; height:8px; border-radius:50%; background:#f0b429; vertical-align:middle"></span></button>
+          <button class="primary" id="applyCanvas">校验并保存<span id="dirtyDot"></span></button>
           <button id="toggleJson">JSON</button>
         </div>
       </div>
-      <div class="row" style="margin-top:10px">
-        <div><label>选中成员 Profile 路径（空白继承默认）</label><input id="nodeProfile" placeholder="andy.json 或 profiles/xxx.json"></div>
-        <div><label>团队入口（负责规划和派单，需为 lead）</label><select id="teamEntry"></select></div>
+
+      <div id="relationshipPanel"><label id="relationshipLabel">选中连线的关系说明</label>
+        <textarea id="edgeDescription" rows="3" maxlength="2000" disabled placeholder="例如：A 负责整体规划，B 自行拆分分配给自己的工作并组织 C 完成。B 遇到困难向 A 汇报。"></textarea>
       </div>
-      <label>选中成员的职责说明</label><textarea id="nodeInstructions" rows="2" maxlength="2000" placeholder="例如：优先处理地基和墙体，遇到阻碍报告具体坐标。"></textarea>
-      <p class="muted">委托线决定可派单对象，结果自动返回；消息线为单向通信；上报线订阅任务结果。任务依赖由协调者运行时设置。保存修改对下次启动生效，当前工程固定使用启动时的结构。</p>
-      <p class="muted">当前执行模式：协调者派单 → 成员部件验收 → 依赖任务解锁 → 协调者整体验收。独立验收节点和成员再次委托将在后续版本支持。</p>
+      <div id="permPanel">
+        <div class="perm-cap-row">
+          <label><input type="checkbox" id="capBlueprint"> 蓝图权威（可设计蓝图）</label>
+          <label><input type="checkbox" id="capFinish"> 全局验收（可提交 finish）</label>
+          <label><input type="checkbox" id="capWhitelist"> 仅白名单模式（未勾选=全部允许再排除）</label>
+        </div>
+        <div class="perm-grid" id="permGrid"></div>
+        <p id="permGroupLegend">展开分组，勾选伙伴可用的能力。计划、等待等基础动作始终可用；施工仍受任务范围约束。</p>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <div><label>伙伴档案路径（可选）</label><input id="nodeProfile" placeholder="andy.json 或 profiles/xxx.json"></div>
+        <div><label>团队入口（接收目标、设计和最终验收）</label><select id="teamEntry"></select></div>
+      </div>
+      <label>这位伙伴负责什么？</label><textarea id="nodeInstructions" rows="2" maxlength="2000" placeholder="例如：优先处理地基和墙体，遇到阻碍报告具体坐标。"></textarea>
+      <p class="hintbox" style="margin-top:10px">连线允许双方协作，关系说明决定如何配合；角色名和关系文字不会授予权限。选中成员后勾选可用工具。任务顺序需由 Agent 登记依赖；文字中的审批或投票约定不等于强制执行门槛。保存修改对新工程生效。</p>
       <p id="canvasValidation" class="muted" style="margin:8px 0 0"></p>
       <div id="jsonBlock" style="display:none; margin-top:10px">
         <label>team.json（高级编辑，与画布同步）</label>
         <textarea id="teamEditor" rows="12" spellcheck="false"></textarea>
       </div>
+</aside></div>
     </div>
-    <div class="card">
-      <h2>当前施工租约</h2>
+<div class="runtime-grid">    <div class="card">
+      <h2>施工占用</h2>
       <table id="claimsTable"><thead><tr><th>部件</th><th>持有者</th><th>过期时间</th></tr></thead><tbody></tbody></table>
     </div>
-    <div class="card"><h2>团队任务</h2><table id="teamTasks"><thead><tr><th>任务</th><th>执行者</th><th>模块与自行施工范围</th><th>依赖 / 协作来源</th><th>状态</th><th>结果</th></tr></thead><tbody></tbody></table></div>
+    <div class="card tasks-card"><h2>任务进展</h2><table id="teamTasks"><thead><tr><th>任务</th><th>执行者</th><th>模块与自行施工范围</th><th>依赖 / 协作来源</th><th>状态</th><th>结果</th></tr></thead><tbody></tbody></table></div>
     <div class="card"><h2>协作提案</h2><table id="teamProposals"><thead><tr><th>发起者 → 接收者</th><th>工作与范围</th><th>状态</th></tr></thead><tbody></tbody></table></div>
+</div>
   </section>
 
   <section id="catalogTab">
@@ -205,7 +184,7 @@
     </div>
     <div class="card">
       <h2>工具（Tools）</h2>
-      <input class="filter" id="toolFilter" placeholder="筛选工具名或描述…">
+      <input class="filter" id="toolFilter" placeholder="筛选工具名或描述…" style="margin-bottom:10px">
       <table id="toolTable"><thead><tr><th>tool</th><th>参数</th><th>说明</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card">
@@ -213,8 +192,8 @@
       <table id="skillTable"><thead><tr><th>skill</th><th>说明</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
-</main>
-<div class="toast" id="toast"></div>
+<div class="footer-note">BUILT BLOCK BY BLOCK · MINDCRAFT</div></main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module">
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -306,7 +285,6 @@ $('#saveSettings').onclick = async () => {
     nested[object] ??= {};
     nested[object][key] = Number(input.value);
   });
-  // building_agent 是嵌套对象：单独走 profile 式整体替换不受支持，这里通过 settings 接口逐项打补丁
   try {
     await api('/api/settings', { method: 'POST', body: JSON.stringify(patch) });
     for (const [object, values] of Object.entries(nested)) {
@@ -344,9 +322,23 @@ $('#saveProfile').onclick = async () => {
 };
 loadProfiles();
 
-// 目录页
+// 目录页 + 工具清单（权限矩阵数据源）
+const catalogTools = [];
+const TOOL_GROUPS = {
+  观察: ['observe_environment', 'observe_cells', 'inspect_block', 'look_at'],
+  移动: ['move_to', 'fly_to', 'land_at'],
+  施工: ['place_block', 'place_row', 'place_rectangle', 'place_cube'],
+  拆除: ['set_demolition_target', 'dig_block', 'dig_row', 'dig_rectangle', 'dig_cube'],
+  验收: ['inspect_part', 'inspect_build', 'get_build_checklist', 'inspect_blueprint'],
+  通信: ['send_message', 'broadcast', 'list_peers'],
+  协作: ['delegate_task', 'prepare_parallel_build', 'reassign_task', 'list_tasks', 'propose_task_share', 'respond_task_share', 'commit_task_share'],
+  认领: ['claim_part', 'release_part', 'query_claims'],
+  查询: ['get_tool_help', 'list_materials']
+};
 async function loadCatalog() {
   const { tools, actions, skills } = await api('/api/catalog');
+  catalogTools.length = 0;
+  catalogTools.push(...tools.map(t => t.name), 'design_blueprint');
   $('#actionTable tbody').innerHTML = actions.map(a =>
     `<tr><td class="name">${a.name}</td></tr>`).join('');
   const renderTools = filter => {
@@ -359,19 +351,48 @@ async function loadCatalog() {
   $('#toolFilter').oninput = event => renderTools(event.target.value);
   $('#skillTable tbody').innerHTML = skills.map(s =>
     `<tr><td class="name">${s.name}</td><td class="desc">${s.description}</td></tr>`).join('');
-  $('#catalogCount').textContent = `${actions.length} actions · ${tools.length} tools · ${skills.length} skills`;
+  buildPermGrid();
 }
-// 团队页：SVG 画布编辑器
-const EDGE_COLORS = { delegate: '#4f9cf9', report: '#2ecc71', message: '#8b939e' };
+loadCatalog();
+
+// ===== 团队页：像素风 SVG 画布编辑器 =====
+const RELATION_COLOR = '#91a580';
+const BUILTIN_ROLES = new Set(['lead', 'builder', 'inspector']);
+// 自定义角色按名字 hash 取 8 色板
+const ROLE_PALETTE = ['#8c70a5', '#488f83', '#a87b32', '#bb785a', '#698844', '#47889d', '#b86886', '#92973d'];
+const roleColor = role => role === 'lead' ? '#397a91' : role === 'inspector' ? '#688f42' : role === 'builder' ? '#8f7458'
+  : ROLE_PALETTE[[...role].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % ROLE_PALETTE.length];
+
+// 8×8 像素脸：每个角色一张脸谱（1=主色 2=副色 3=眼色 0=透明底色）
+const FACES = {
+  lead:      { bg: '#8a5a2b', map: ['11111111','10000001','10310031','10000001','10222201','10222201','10000001','11111111'], c: { 1: '#3a2a12', 2: '#4aedd9', 3: '#4aedd9' } },
+  builder:   { bg: '#7a5b34', map: ['22222222','21111112','21000012','21111112','21000012','21000012','21111112','22222222'], c: { 1: '#c9a166', 2: '#5b432a', 0: '#5b432a' } },
+  inspector: { bg: '#161320', map: ['11111111','10000001','10310031','10000001','10000001','10310031','10000001','11111111'], c: { 1: '#2b2440', 3: '#c79bf2' } },
+  custom:    { bg: '#4a3a5c', map: ['11111111','10000001','10310031','10000001','10222201','10222201','10000001','11111111'], c: { 1: '#6a5a7c', 2: '#f8af2b', 3: '#f8af2b' } }
+};
+function pixelFace(role, accent) {
+  const face = FACES[BUILTIN_ROLES.has(role) ? role : 'custom'];
+  const px = 7, size = px * 8;  // 56×56 头像
+  const cells = [];
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+    const code = face.map[y][x];
+    const color = code === '1' ? face.c[1] : code === '2' ? face.c[2] : code === '3' ? face.c[3] : face.bg;
+    if (code !== '0') cells.push({ x: x * px, y: y * px, color: code === '1' && accent ? accent : color });
+  }
+  return { size, cells };
+}
+
 const svg = $('#teamCanvas');
-let graph = { agents: {}, edges: [], rules: undefined };  // agents: name -> {role, x, y}
-let selected = null;                          // {type:'agent', name} | {type:'edge', index}
-let linkDraft = null;                         // 正在拖出的连线 {from, x, y}
-let hoverName = null;                         // 悬停的节点（连线时作为目标高亮）
-let dirty = false;                            // 画布有未保存修改时，轮询不回写
+const ns = 'http://www.w3.org/2000/svg';
+let graph = { coordination: 'relationships', agents: {}, edges: [] };
+let pendingLegacySpec = null;
+let selected = null;
+let linkDraft = null;
+let hoverName = null;
+let dirty = false;
 let runtimeAgents = {};
 
-const nodeRadius = 26;
+const nodeRadius = 28;
 const agentNames = () => Object.keys(graph.agents);
 
 function markDirty() {
@@ -385,66 +406,72 @@ function markClean(message) {
   if (message) $('#canvasValidation').textContent = message;
 }
 
+// 动态图例：按画布实际使用的角色/语义生成
+function renderLegend() {
+  const roles = [...new Set(agentNames().map(name => graph.agents[name].role ?? 'builder'))];
+  $('#canvasLegend').innerHTML =
+    roles.map(role => `<span><span class="dotc" style="background:${roleColor(role)}"></span>${role}</span>`).join('') +
+    '<span>— 自然语言关系</span>';
+  $('#memberCount').textContent = agentNames().length;
+  $('#relationCount').textContent = graph.edges.length;
+}
+
 function render() {
-  const ns = 'http://www.w3.org/2000/svg';
   const defs = svg.querySelector('defs');
   svg.innerHTML = '';
-  svg.append(defs);  // marker 定义保留，innerHTML 清空后重新挂回
+  svg.append(defs);
   $('#emptyState').style.display = agentNames().length ? 'none' : 'flex';
-  const line = (x1, y1, x2, y2, stroke, width, dash) => {
-    const el = document.createElementNS(ns, 'line');
-    for (const [k, v] of Object.entries({ x1, y1, x2, y2, stroke, 'stroke-width': width })) el.setAttribute(k, v);
-    if (dash) el.setAttribute('stroke-dasharray', dash);
-    return el;
-  };
-  const edgeTrim = (from, to) => {   // 边从节点边缘出发而非圆心，避免箭头被头像盖住
+  renderLegend();
+  const edgeTrim = (from, to) => {
     const dx = to.x - from.x, dy = to.y - from.y;
     const len = Math.hypot(dx, dy) || 1;
-    return { x1: from.x + dx / len * (nodeRadius + 7), y1: from.y + dy / len * (nodeRadius + 7),
-             x2: to.x - dx / len * (nodeRadius + 9), y2: to.y - dy / len * (nodeRadius + 9) };
+    return { x1: from.x + dx / len * (nodeRadius + 9), y1: from.y + dy / len * (nodeRadius + 9),
+             x2: to.x - dx / len * (nodeRadius + 11), y2: to.y - dy / len * (nodeRadius + 11) };
   };
   for (const [index, edge] of graph.edges.entries()) {
     const from = graph.agents[edge.from], to = graph.agents[edge.to];
     if (!from || !to) continue;
-    const stroke = EDGE_COLORS[edge.type] ?? '#8b939e';
+    const stroke = RELATION_COLOR;
     const active = selected?.type === 'edge' && selected.index === index;
     const path = edgeTrim(from, to);
-    // Separate parallel and return edges so delegation and reporting are both
-    // visible and individually selectable in the centralized example.
     const siblings = graph.edges.filter(e => (e.from === edge.from && e.to === edge.to) || (e.from === edge.to && e.to === edge.from));
     const lane = siblings.indexOf(edge) - (siblings.length - 1) / 2;
     const direction = edge.from < edge.to ? 1 : -1;
     const length = Math.hypot(to.x - from.x, to.y - from.y) || 1;
-    const cx = (from.x + to.x) / 2 - (to.y - from.y) / length * direction * lane * 72;
-    const cy = (from.y + to.y) / 2 + (to.x - from.x) / length * direction * lane * 72;
+    const cx = (from.x + to.x) / 2 - (to.y - from.y) / length * direction * lane * 76;
+    const cy = (from.y + to.y) / 2 + (to.x - from.x) / length * direction * lane * 76;
     const curve = `M ${path.x1} ${path.y1} Q ${cx} ${cy} ${path.x2} ${path.y2}`;
     const visual = document.createElementNS(ns, 'path');
-    for (const [key, value] of Object.entries({ d: curve, fill: 'none', stroke, 'stroke-width': active ? 3.5 : 2 })) visual.setAttribute(key, value);
-    visual.setAttribute('marker-end', `url(#arrow-${edge.type})`);
+    for (const [key, value] of Object.entries({ d: curve, fill: 'none', stroke, 'stroke-width': active ? 5 : 4 })) visual.setAttribute(key, value);
     svg.append(visual);
     const mid = document.createElementNS(ns, 'text');
-    mid.setAttribute('x', (path.x1 + 2 * cx + path.x2) / 4); mid.setAttribute('y', (path.y1 + 2 * cy + path.y2) / 4 - 6);
-    mid.setAttribute('fill', stroke); mid.setAttribute('font-size', 11); mid.setAttribute('text-anchor', 'middle');
-    mid.textContent = { delegate: '派单', report: '结果上报', message: '消息' }[edge.type] ?? edge.type;
+    mid.setAttribute('x', (path.x1 + 2 * cx + path.x2) / 4); mid.setAttribute('y', (path.y1 + 2 * cy + path.y2) / 4 - 7);
+    mid.setAttribute('fill', stroke); mid.setAttribute('font-size', 11); mid.setAttribute('font-weight', 'bold');
+    mid.setAttribute('font-family', 'Lucida Console, monospace'); mid.setAttribute('text-anchor', 'middle');
+    mid.setAttribute('stroke', '#f0f5e9'); mid.setAttribute('stroke-width', '3'); mid.setAttribute('paint-order', 'stroke');
+    const narrow = svg.getBoundingClientRect().width < 480;
+    mid.textContent = edge.label || (narrow ? '协作' : edge.description ? edge.description.slice(0, 14) + (edge.description.length > 14 ? '…' : '') : '协作关系');
+    const relationTitle = document.createElementNS(ns, 'title'); relationTitle.textContent = edge.description ?? '点击填写关系说明'; visual.append(relationTitle);
     mid.style.pointerEvents = 'none';
     svg.append(mid);
     const hit = document.createElementNS(ns, 'path');
-    for (const [key, value] of Object.entries({ d: curve, fill: 'none', stroke: 'transparent', 'stroke-width': 16 })) hit.setAttribute(key, value);
+    for (const [key, value] of Object.entries({ d: curve, fill: 'none', stroke: 'transparent', 'stroke-width': 18 })) hit.setAttribute(key, value);
     hit.style.cursor = 'pointer';
     hit.onclick = () => select({ type: 'edge', index });
     svg.append(hit);
   }
   if (linkDraft) {
-    const draft = line(graph.agents[linkDraft.from].x, graph.agents[linkDraft.from].y, linkDraft.x, linkDraft.y, '#f0b429', 2, '5 4');
+    const draft = document.createElementNS(ns, 'line');
+    for (const [k, v] of Object.entries({ x1: graph.agents[linkDraft.from].x, y1: graph.agents[linkDraft.from].y, x2: linkDraft.x, y2: linkDraft.y, stroke: '#f8af2b', 'stroke-width': 3 })) draft.setAttribute(k, v);
+    draft.setAttribute('stroke-dasharray', '6 4');
     svg.append(draft);
-    // 连线悬停目标高亮：把候选节点画出脉冲圈
     const hoverNode = hoverName && hoverName !== linkDraft.from ? graph.agents[hoverName] : null;
     if (hoverNode) {
-      const pulse = document.createElementNS(ns, 'circle');
-      pulse.setAttribute('cx', hoverNode.x); pulse.setAttribute('cy', hoverNode.y);
-      pulse.setAttribute('r', nodeRadius + 10); pulse.setAttribute('fill', 'none');
-      pulse.setAttribute('stroke', '#f0b429'); pulse.setAttribute('stroke-width', 2);
-      pulse.setAttribute('stroke-dasharray', '4 3');
+      const pulse = document.createElementNS(ns, 'rect');
+      pulse.setAttribute('x', hoverNode.x - nodeRadius - 8); pulse.setAttribute('y', hoverNode.y - nodeRadius - 8);
+      pulse.setAttribute('width', (nodeRadius + 8) * 2); pulse.setAttribute('height', (nodeRadius + 8) * 2);
+      pulse.setAttribute('fill', 'none'); pulse.setAttribute('stroke', '#f8af2b');
+      pulse.setAttribute('stroke-width', 3); pulse.setAttribute('stroke-dasharray', '6 4');
       svg.append(pulse);
     }
   }
@@ -452,39 +479,60 @@ function render() {
     const group = document.createElementNS(ns, 'g');
     group.style.cursor = 'grab';
     const active = selected?.type === 'agent' && selected.name === name;
-    const roleColor = agent.role === 'lead' ? '#4f9cf9' : agent.role === 'inspector' ? '#2ecc71' : '#8b939e';
-    const ring = document.createElementNS(ns, 'circle');
-    ring.setAttribute('cx', agent.x); ring.setAttribute('cy', agent.y); ring.setAttribute('r', nodeRadius + 5);
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', active ? '#f0b429' : hoverName === name && linkDraft ? '#f0b429' : roleColor);
-    ring.setAttribute('stroke-width', active ? 3 : 1.5);
-    if (!linkDraft) ring.setAttribute('stroke-dasharray', '3 3');   // 虚线环=可拖出连线
-    ring.style.cursor = 'crosshair';
-    const head = document.createElementNS(ns, 'circle');
-    head.setAttribute('cx', agent.x); head.setAttribute('cy', agent.y); head.setAttribute('r', nodeRadius);
-    head.setAttribute('fill', agent.role === 'lead' ? '#1f3a5f' : agent.role === 'inspector' ? '#1f4d33' : '#21262e');
-    head.setAttribute('stroke', active ? '#f0b429' : roleColor);
-    head.setAttribute('stroke-width', active ? 2.5 : 1);
+    const role = agent.role ?? 'builder';
+    const color = roleColor(role);
+    // 像素头像（8×8 放大 + 底板）
+    const face = pixelFace(role, BUILTIN_ROLES.has(role) ? null : color);
+    const half = face.size / 2;
+    const plate = document.createElementNS(ns, 'rect');
+    plate.setAttribute('x', agent.x - half - 3); plate.setAttribute('y', agent.y - half - 3);
+    plate.setAttribute('width', face.size + 6); plate.setAttribute('height', face.size + 6);
+    plate.setAttribute('fill', face.bg); plate.setAttribute('stroke', active ? '#f8af2b' : color);
+    plate.setAttribute('stroke-width', active ? 4 : 3);
+    group.append(plate);
+    for (const cell of face.cells) {
+      const rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', agent.x - half + cell.x); rect.setAttribute('y', agent.y - half + cell.y);
+      rect.setAttribute('width', 7); rect.setAttribute('height', 7); rect.setAttribute('fill', cell.color);
+      group.append(rect);
+    }
+    // 选中/连线目标的外框
+    if (active || (hoverName === name && linkDraft)) {
+      const sel = document.createElementNS(ns, 'rect');
+      sel.setAttribute('x', agent.x - half - 9); sel.setAttribute('y', agent.y - half - 9);
+      sel.setAttribute('width', face.size + 18); sel.setAttribute('height', face.size + 18);
+      sel.setAttribute('fill', 'none'); sel.setAttribute('stroke', '#f8af2b'); sel.setAttribute('stroke-width', 2);
+      sel.setAttribute('stroke-dasharray', '5 4');
+      group.append(sel);
+    }
+    // MC 玩家名牌样式（半透明黑底白字）
+    const tag = document.createElementNS(ns, 'rect');
+    const nameWidth = Math.max(56, name.length * 8 + 12);
+    tag.setAttribute('x', agent.x - nameWidth / 2); tag.setAttribute('y', agent.y + half + 4);
+    tag.setAttribute('width', nameWidth); tag.setAttribute('height', 17); tag.setAttribute('fill', 'rgba(0,0,0,.55)');
+    group.append(tag);
     const label = document.createElementNS(ns, 'text');
-    label.setAttribute('x', agent.x); label.setAttribute('y', agent.y - 2);
-    label.setAttribute('fill', '#e4e7eb'); label.setAttribute('font-size', 12); label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('x', agent.x); label.setAttribute('y', agent.y + half + 17);
+    label.setAttribute('fill', '#fff'); label.setAttribute('font-size', 11); label.setAttribute('font-weight', 'bold');
+    label.setAttribute('font-family', 'Lucida Console, monospace'); label.setAttribute('text-anchor', 'middle');
     label.textContent = name.slice(0, 10);
-    const role = document.createElementNS(ns, 'text');
-    role.setAttribute('x', agent.x); role.setAttribute('y', agent.y + 13);
-    role.setAttribute('fill', roleColor); role.setAttribute('font-size', 10); role.setAttribute('text-anchor', 'middle');
-    role.textContent = runtimeAgents[name]?.status ?? agent.role ?? 'builder';
-    group.append(ring, head, label, role);
-    const responsibility = document.createElementNS(ns, 'text');
-    responsibility.setAttribute('x', agent.x); responsibility.setAttribute('y', agent.y + nodeRadius + 23);
-    responsibility.setAttribute('fill', '#9aa3ad'); responsibility.setAttribute('font-size', 11); responsibility.setAttribute('text-anchor', 'middle');
-    responsibility.textContent = { lead: '蓝图 · 监督 · 最终验收', builder: '建筑施工', inspector: '只读巡检' }[agent.role] ?? '';
+    group.append(label);
+    // 角色副标签：运行时显示状态，静态显示角色名
+    const roleText = document.createElementNS(ns, 'text');
+    roleText.setAttribute('x', agent.x); roleText.setAttribute('y', agent.y + half + 33);
+    roleText.setAttribute('fill', color); roleText.setAttribute('font-size', 10); roleText.setAttribute('font-weight', 'bold');
+    roleText.setAttribute('font-family', 'Lucida Console, monospace'); roleText.setAttribute('text-anchor', 'middle');
+    roleText.textContent = runtimeAgents[name]?.status ?? role;
+    group.append(roleText);
     const title = document.createElementNS(ns, 'title');
-    title.textContent = agent.instructions || responsibility.textContent;
-    group.append(responsibility, title);
+    title.textContent = agent.instructions || role + (agent.permissions ? '（自定义权限）' : '');
+    group.append(title);
     group.onmouseenter = () => { hoverName = name; if (linkDraft) render(); };
     group.onmouseleave = () => { if (hoverName === name) { hoverName = null; if (linkDraft) render(); } };
-    group.onmousedown = event => {
-      if (event.target === ring) startLink(name, event);
+    group.onpointerdown = event => {
+      svg.setPointerCapture(event.pointerId);
+      // 头像本体=拖动；按住 Shift 或点外框=拖出连线
+      if (event.shiftKey || event.target === plate && event.detail > 1) startLink(name, event);
       else startDrag(name, event);
       select({ type: 'agent', name });
     };
@@ -506,7 +554,7 @@ function updateLink(event) {
   linkDraft.x = event.clientX - rect.left; linkDraft.y = event.clientY - rect.top;
   render();
 }
-svg.onmousemove = event => {
+svg.onpointermove = event => {
   if (drag) {
     dragMoved = true;
     const rect = svg.getBoundingClientRect();
@@ -516,21 +564,22 @@ svg.onmousemove = event => {
   } else if (linkDraft) updateLink(event);
 };
 let dragMoved = false;
-svg.onmouseup = event => {
+svg.onpointerup = event => {
+  if (svg.hasPointerCapture(event.pointerId)) svg.releasePointerCapture(event.pointerId);
   if (!linkDraft) {
-    if (drag && dragMoved) markDirty();
+    if (drag && dragMoved) { syncToEditor(); markDirty(); }
     drag = null; dragMoved = false;
     return;
   }
   const rect = svg.getBoundingClientRect();
   const x = event.clientX - rect.left, y = event.clientY - rect.top;
-  const hit = agentNames().find(name => Math.hypot(graph.agents[name].x - x, graph.agents[name].y - y) <= nodeRadius + 5);
+  const hit = agentNames().find(name => Math.hypot(graph.agents[name].x - x, graph.agents[name].y - y) <= nodeRadius + 8);
   if (hit && hit !== linkDraft.from) {
     const duplicate = graph.edges.some(e =>
       (e.from === linkDraft.from && e.to === hit) || (e.from === hit && e.to === linkDraft.from));
-    if (duplicate) toast('两个成员之间已有一条连线，点击连线可改类型');
+    if (duplicate) toast('这两位伙伴已经相连，点击连线可编辑关系说明');
     else {
-      graph.edges.push({ from: linkDraft.from, to: hit, type: 'message' });
+      graph.edges.push({ from: linkDraft.from, to: hit, description: '' });
       select({ type: 'edge', index: graph.edges.length - 1 });
       markDirty();
       syncToEditor();
@@ -539,11 +588,10 @@ svg.onmouseup = event => {
   linkDraft = null; drag = null; dragMoved = false;
   render();
 };
-svg.onmousedown = event => {
-  if (event.target === svg) select(null);   // 点空白取消选中
-};
+svg.onpointerdown = event => { if (event.target === svg) select(null); };
+svg.onpointercancel = () => { drag = null; linkDraft = null; dragMoved = false; render(); };
 svg.ondblclick = event => {
-  if (event.target !== svg) return;          // 双击空白：就地添加成员
+  if (event.target !== svg) return;
   const rect = svg.getBoundingClientRect();
   const x = event.clientX - rect.left, y = event.clientY - rect.top;
   const base = 'agent';
@@ -553,23 +601,92 @@ svg.ondblclick = event => {
   select({ type: 'agent', name });
   syncToEditor();
   markDirty();
-  toast('已添加 ' + name + '，在左侧输入框改名请先删掉再添加');
+  toast('已添加 ' + name + '；删除后重新添加可改名');
 };
+
+// ===== 权限矩阵 =====
+let knownTools = [];
+function buildPermGrid() {
+  knownTools = catalogTools.length ? catalogTools : Object.values(TOOL_GROUPS).flat();
+  const grouped = new Map(Object.entries(TOOL_GROUPS));
+  const listed = new Set([...grouped.values()].flat());
+  const rest = knownTools.filter(name => !listed.has(name));
+  if (rest.length) grouped.set('其他', rest);
+  $('#permGrid').innerHTML = [...grouped.entries()].map(([group, tools]) =>
+    `<details class="permission-group"><summary>${group}<span>${tools.length} 项能力</span></summary>` +
+    tools.map(tool => `<label><input type="checkbox" data-perm="${tool}"> ${tool}</label>`).join('') + '</details>'
+  ).join('');
+  $('#permGrid').querySelectorAll('[data-perm]').forEach(box => box.onchange = writePermissions);
+  for (const id of ['capBlueprint', 'capFinish', 'capWhitelist']) $('#' + id).onchange = writePermissions;
+  if (selected?.type === 'agent') fillPermPanel(graph.agents[selected.name]);
+}
+function permissionsFor(agent) {
+  const builder = { allow: ['*'], deny: ['design_blueprint'], blueprintAuthority: false, finishGate: false };
+  if (agent.permissions) return { ...builder, ...agent.permissions };
+  if (agent.role === 'lead') return { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true };
+  if (agent.role === 'inspector') return { allow: ['get_tool_help', 'send_message', 'broadcast', 'list_peers', 'observe_environment', 'observe_cells', 'inspect_block', 'look_at', 'inspect_build', 'get_build_checklist', 'inspect_part', 'inspect_blueprint', 'list_materials', 'claim_part', 'release_part', 'query_claims', 'move_to', 'fly_to', 'land_at'], deny: [], whitelistOnly: true, blueprintAuthority: false, finishGate: false };
+  return builder;
+}
+function fillPermPanel(agent) {
+  $('#permPanel').classList.toggle('open', selected?.type === 'agent');
+  const p = permissionsFor(agent);
+  const allowed = new Set(p.allow ?? ['*']);
+  const denied = new Set(p.deny ?? []);
+  $('#permGrid').querySelectorAll('[data-perm]').forEach(box => {
+    const tool = box.dataset.perm;
+    box.checked = p.whitelistOnly ? allowed.has(tool) : (allowed.has('*') || allowed.has(tool)) && !denied.has(tool);
+  });
+  $('#capBlueprint').checked = p.blueprintAuthority === true;
+  $('#capFinish').checked = p.finishGate === true;
+  $('#capWhitelist').checked = p.whitelistOnly === true;
+}
+function writePermissions() {
+  if (selected?.type !== 'agent') return;
+  const agent = graph.agents[selected.name];
+  {
+    const checked = [...$('#permGrid').querySelectorAll('[data-perm]:checked')].map(b => b.dataset.perm);
+    const whitelist = $('#capWhitelist').checked;
+    agent.permissions = {
+      ...(whitelist ? { allow: checked, whitelistOnly: true } : { allow: ['*'], deny: knownTools.filter(t => !checked.includes(t)) }),
+      blueprintAuthority: $('#capBlueprint').checked, finishGate: $('#capFinish').checked
+    };
+  }
+  syncToEditor(); markDirty();
+}
 
 function select(item) {
   selected = item;
-  if (item?.type === 'agent') $('#roleSelect').value = graph.agents[item.name].role ?? 'builder';
+  if (item?.type === 'agent') {
+    const agent = graph.agents[item.name];
+    $('#roleInput').value = agent.role ?? 'builder';
+    fillPermPanel(agent);
+  } else $('#permPanel').classList.remove('open');
   $('#nodeProfile').disabled = $('#nodeInstructions').disabled = item?.type !== 'agent';
   $('#nodeProfile').value = item?.type === 'agent' ? graph.agents[item.name].profile ?? '' : '';
   $('#nodeInstructions').value = item?.type === 'agent' ? graph.agents[item.name].instructions ?? '' : '';
-  if (item?.type === 'edge') $('#edgeTypeSelect').value = graph.edges[item.index]?.type ?? 'message';
+  $('#roleInput').disabled = item?.type !== 'agent';
+  $('#edgeDescription').disabled = $('#edgeLabel').disabled = item?.type !== 'edge';
+  $('#edgeDescription').value = item?.type === 'edge' ? graph.edges[item.index]?.description ?? '' : '';
+  $('#relationshipLabel').textContent = item?.type === 'edge' ? `${graph.edges[item.index].from} ↔ ${graph.edges[item.index].to}：如何配合` : '选中连线的关系说明';
+  $('#relationshipPanel').hidden = item?.type !== 'edge';
+  $('#edgeLabel').parentElement.hidden = item?.type !== 'edge';
+  $('#roleInput').parentElement.hidden = item?.type === 'edge';
+  $('#nodeProfile').parentElement.hidden = item?.type === 'edge';
+  $('#nodeInstructions').hidden = $('#nodeInstructions').previousElementSibling.hidden = item?.type === 'edge';
+  if (item?.type === 'edge') {
+    const edge = graph.edges[item.index] ?? {};
+    $('#edgeLabel').value = edge.label ?? '';
+  }
   render();
 }
-$('#roleSelect').onchange = () => {
-  if (selected?.type === 'agent') {
-    graph.agents[selected.name].role = $('#roleSelect').value;
-    render(); syncToEditor(); markDirty();
-  }
+$('#roleInput').onchange = () => {
+  if (selected?.type !== 'agent') return;
+  const agent = graph.agents[selected.name];
+  const value = $('#roleInput').value.trim().toLowerCase() || 'builder';
+  agent.permissions = permissionsFor(agent); // Renaming never changes authority.
+  agent.role = value;
+  fillPermPanel(agent);
+  render(); syncToEditor(); markDirty();
 };
 for (const [id, key] of [['nodeProfile', 'profile'], ['nodeInstructions', 'instructions']]) {
   $('#' + id).onchange = () => {
@@ -579,14 +696,35 @@ for (const [id, key] of [['nodeProfile', 'profile'], ['nodeInstructions', 'instr
   };
 }
 $('#teamEntry').onchange = () => { graph.entryAgent = $('#teamEntry').value; syncToEditor(); markDirty(); };
-$('#teamAssignment').onchange = () => { graph.rules = { ...defaultRules(), ...graph.rules, assignment: $('#teamAssignment').value }; syncToEditor(); markDirty(); };
-$('#edgeTypeSelect').onchange = () => {
+$('#edgeDescription').oninput = () => {
+  if (selected?.type !== 'edge') return;
+  graph.edges[selected.index].description = $('#edgeDescription').value;
+  render(); syncToEditor(); markDirty();
+};
+$('#edgeLabel').onchange = () => {
   if (selected?.type === 'edge') {
-    graph.edges[selected.index].type = $('#edgeTypeSelect').value;
+    const edge = graph.edges[selected.index];
+    const value = $('#edgeLabel').value.trim();
+    if (value) edge.label = value; else delete edge.label;
     render(); syncToEditor(); markDirty();
   }
 };
-const defaultRules = () => ({ assignment: 'lead-assigns', handoff: 'on-part-verified', finish: 'lead-gates' });
+function relationshipEdges(names, mode) {
+  const pairs = mode === 'hierarchy' ? names.slice(1).map((to, i) => [names[i], to]) :
+    names.flatMap((from, i) => names.slice(i + 1).map(to => [from, to]));
+  return pairs.map(([from, to]) => ({ from, to,
+    label: mode === 'hierarchy' || (mode === 'centralized' && from === names[0]) ? '分工与汇报' : '协商互助',
+    description: mode === 'peers' || (mode === 'centralized' && from !== names[0]) ?
+    `${from} 与 ${to} 平等协商，根据能力分担工作。需要帮助时说明范围，达成一致后登记任务或交接；避免重复施工。` :
+    `${from} 向 ${to} 分配目标和范围；${to} 在自己的权限和范围内执行，也可继续委托相连成员，汇总结果后向 ${from} 汇报。` }));
+}
+$('#convertRelationships').onclick = async () => {
+  try {
+    const { spec } = await api('/api/team/migrate', { method: 'POST', body: JSON.stringify({ spec: pendingLegacySpec }) });
+    specToGraph(spec); syncToEditor(); markDirty();
+    toast('关系已转换，权限保持原配置。检查后保存并开始新工程。');
+  } catch (error) { toast(error.message); }
+};
 document.addEventListener('keydown', event => {
   if (event.key === 'Delete' || (event.ctrlKey && event.key.toLowerCase() === 's')) {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
@@ -611,39 +749,47 @@ $('#addAgentBtn').onclick = () => {
   $('#newAgentName').focus();
 };
 
-// 画布 ↔ JSON ↔ spec 双向同步
+// Canvas and JSON share one relationship format; old specs enter through migration only.
 function graphToSpec() {
   return {
+    coordination: 'relationships',
     agents: Object.fromEntries(Object.entries(graph.agents).map(([name, a]) => [name, { role: a.role ?? 'builder',
-      ...(a.profile ? { profile: a.profile } : {}), ...(a.instructions ? { instructions: a.instructions } : {}), position: { x: a.x, y: a.y } }])),
+      ...(a.profile ? { profile: a.profile } : {}), ...(a.instructions ? { instructions: a.instructions } : {}),
+      ...(a.permissions ? { permissions: a.permissions } : {}), position: { x: a.x, y: a.y } }])),
     ...(graph.entryAgent && graph.agents[graph.entryAgent] ? { entryAgent: graph.entryAgent } : {}),
-    edges: graph.edges.map(({ from, to, type }) => ({ from, to, type })),
-    rules: { ...defaultRules(), ...graph.rules }
+    edges: graph.edges.map(({ from, to, description, label, note }) => ({ from, to, description,
+      ...(label ? { label } : {}), ...(note ? { note } : {}) }))
   };
 }
 function specToGraph(spec) {
   if (!spec?.agents) return;
+  if (spec.coordination !== 'relationships' || spec.rules != null || (spec.edges ?? []).some(e => e.kind != null || e.type != null)) {
+    pendingLegacySpec = spec;
+    $('#migrationBanner').hidden = false;
+    throw new Error('这是旧版团队配置，请点击“转换旧配置”后开始新工程');
+  }
+  pendingLegacySpec = null;
+  $('#migrationBanner').hidden = true;
   const rect = svg.getBoundingClientRect();
   const names = Object.keys(spec.agents);
   const perRow = Math.ceil(Math.sqrt(names.length));
-  graph = { entryAgent: spec.entryAgent, rules: spec.rules, edges: [...(spec.edges ?? [])],
+  graph = { coordination: 'relationships', entryAgent: spec.entryAgent,
+    edges: (spec.edges ?? []).map(({ from, to, description, label, note }) => ({ from, to, description, ...(label ? { label } : {}), ...(note ? { note } : {}) })),
     agents: Object.fromEntries(names.map((name, i) => [name, {
       profile: spec.agents[name].profile, instructions: spec.agents[name].instructions,
       role: spec.agents[name].role ?? 'builder',
-      x: spec.agents[name].position?.x ?? (rect.width || 800) / 2 + (i % perRow - (perRow - 1) / 2) * 130,
-      y: spec.agents[name].position?.y ?? (rect.height || 440) / 2 + (Math.floor(i / perRow) - (perRow / 2 - 0.5)) * 110
+      permissions: spec.agents[name].permissions ? structuredClone(spec.agents[name].permissions) : undefined,
+      x: spec.agents[name].position?.x ?? (rect.width || 800) / 2 + (i % perRow - (perRow - 1) / 2) * 140,
+      y: spec.agents[name].position?.y ?? (rect.height || 460) / 2 + (Math.floor(i / perRow) - (perRow / 2 - 0.5)) * 120
     }])) };
-  if (graph.rules?.assignment === 'spatial-parallel') graph.rules = { ...graph.rules, assignment: 'lead-assigns' };
-  selected = null;
-  $('#teamAssignment').value = graph.rules?.assignment ?? 'lead-assigns';
+  select(null);
   render();
 }
 function syncToEditor() {
   $('#teamEditor').value = JSON.stringify(graphToSpec(), null, 2);
-  $('#teamAssignment').value = graph.rules?.assignment ?? 'lead-assigns';
   const names = agentNames();
   $('#teamEntry').replaceChildren(...names.map(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; return option; }));
-  $('#teamEntry').value = graph.entryAgent ?? names.find(name => graph.agents[name].role === 'lead') ?? names[0] ?? '';
+  $('#teamEntry').value = graph.entryAgent ?? names.find(name => ['lead'].includes(graph.agents[name].role) || graph.agents[name].permissions?.blueprintAuthority) ?? names[0] ?? '';
 }
 $('#teamEditor').onblur = () => {
   try { specToGraph(JSON.parse($('#teamEditor').value)); markDirty(); }
@@ -653,10 +799,11 @@ $('#toggleJson').onclick = () => {
   const block = $('#jsonBlock');
   block.style.display = block.style.display === 'none' ? 'block' : 'none';
 };
-$('#loadCentralizedExample').onclick = () => {
+function defaultTeamSpec(mode = 'centralized') {
   const rect = svg.getBoundingClientRect();
-  const width = rect.width || 800, height = rect.height || 440;
+  const width = rect.width || 800, height = rect.height || 460;
   const spec = {
+    coordination: 'relationships',
     entryAgent: 'lead',
     agents: {
       lead: {
@@ -672,42 +819,40 @@ $('#loadCentralizedExample').onclick = () => {
         instructions: '你是施工成员，按共享蓝图和任务 scope 施工；同一模块可有其他成员参与。根据现场选择顺序，与队友交流支撑、分工、让路和协助。需要分担时 propose_task_share 提出自己的局部范围，队友 respond_task_share 接受后，由发起者在动作之间 commit_task_share 正式交接。空闲时可以回应提案或让路，接受提案后 end_turn，等待正式任务再施工。验收自己的任务并移到不挡路的位置后 complete_task。遇到阻塞向 lead 报告；不擅改蓝图或 requirements，进度写入步骤 evidence。'
       }
     },
-    edges: [
-      { from: 'lead', to: 'builder_1', type: 'delegate' },
-      { from: 'builder_1', to: 'lead', type: 'report' },
-      { from: 'lead', to: 'builder_2', type: 'delegate' },
-      { from: 'builder_2', to: 'lead', type: 'report' },
-      ...['lead', 'builder_1', 'builder_2'].flatMap(from => ['lead', 'builder_1', 'builder_2']
-        .filter(to => to !== from).map(to => ({ from, to, type: 'message' })))
-    ],
-    rules: defaultRules()
+    edges: relationshipEdges(['lead', 'builder_1', 'builder_2'], mode)
   };
+  if (mode !== 'centralized') {
+    spec.agents.lead.instructions = '你是工程入口，负责接收用户目标、发布共享蓝图和最终验收。根据关系说明与成员权限组织协作，通过正式任务登记范围和依赖；尊重成员的自主分工。';
+    for (const name of ['builder_1', 'builder_2']) spec.agents[name].instructions = '根据关系说明、自己的权限和任务范围协作。可以执行，也可以把自己的部分范围正式委托给相连成员；等待下级完成并验收原始范围后，向任务分配者汇报。遇到阻塞与相连成员沟通，不擅自修改蓝图或扩大权限。';
+  }
+  return spec;
+}
+function applyTeamPreset(mode, reset = false) {
+  const names = agentNames();
+  let spec;
+  if (reset || !names.length) spec = defaultTeamSpec(mode);
+  else {
+    const before = graphToSpec();
+    const entry = before.entryAgent ?? names.find(name => before.agents[name].role === 'lead') ?? names[0];
+    spec = { ...before, entryAgent: entry, edges: relationshipEdges([entry, ...names.filter(name => name !== entry)], mode) };
+  }
   drag = null; linkDraft = null; hoverName = null;
   specToGraph(spec);
   syncToEditor();
-  select({ type: 'agent', name: 'lead' });
+  select({ type: 'agent', name: spec.entryAgent });
   markDirty();
-  toast('中心化示例已载入：1 个中心 agent + 2 个施工 agent，可继续编辑或保存并启动');
-};
-$$('[data-preset]').forEach(button => button.onclick = async () => {
-  const names = agentNames();
-  if (!names.length) return toast('画布上还没有成员');
-  const before = graphToSpec();
-  const spec = { ...before, entryAgent: names[0], agents: Object.fromEntries(names.map((name, i) => [name, { ...before.agents[name], role: i === 0 ? 'lead' : 'builder' }])),
-    edges: button.dataset.preset === 'centralized' ? [
-      ...names.slice(1).flatMap(to => [{ from: names[0], to, type: 'delegate' }, { from: to, to: names[0], type: 'report' }]),
-      ...names.flatMap(from => names.filter(to => to !== from).map(to => ({ from, to, type: 'message' })))
-    ] : [],
-    rules: defaultRules() };
-  specToGraph(spec);
-  syncToEditor();
-  markDirty();
+  const title = { centralized: '中心化', peers: '平等协商', hierarchy: '层级协作' }[mode];
+  toast(`${title}预设已添加到画布：${agentNames().length} 位伙伴、${graph.edges.length} 条关系，可继续编辑并保存`);
+}
+$('#loadCentralizedExample').onclick = () => applyTeamPreset('centralized', true);
+$$('[data-preset]').forEach(button => button.onclick = () => {
+  try { applyTeamPreset(button.dataset.preset); }
+  catch (error) { toast(error.message); }
 });
 $('#applyCanvas').onclick = async () => {
   try {
     const spec = JSON.parse($('#teamEditor').value);
     await api('/api/team', { method: 'POST', body: JSON.stringify({ spec }) });
-    graph.rules = spec.rules;
     markClean('已保存 ✓ 新结构对下次启动团队生效');
     loadTeam(true);
   } catch (error) { toast(error.message); }
@@ -716,9 +861,8 @@ $('#applyCanvas').onclick = async () => {
 async function loadTeam(force = false) {
   try {
     const { spec, validation, claims } = await api('/api/team');
-    // 编辑中（dirty）不回写画布，避免打断用户；只更新校验文案和租约表。
     if (spec && !dirty && (force || !$('#teamEditor').value || !agentNames().length)) specToGraph(spec);
-    if (spec && !dirty && document.activeElement !== $('#teamEditor')) syncToEditor();
+    if (spec && !dirty && !pendingLegacySpec && document.activeElement !== $('#teamEditor')) syncToEditor();
     if (!dirty) $('#canvasValidation').textContent = spec
       ? (validation.ok ? '当前 spec 有效 ✓' : '⚠ 当前 spec 无效：' + validation.errors.join('；'))
       : '画布为空——添加成员或用预设生成';
@@ -749,6 +893,7 @@ async function refreshTeamRuntime() {
   try {
     const state = await api('/api/team/runtime');
     runtimeAgents = Object.fromEntries(state.agents.map(a => [a.name, a]));
+    $('#activeTaskCount').textContent = state.tasks.filter(t => t.status === 'running').length;
     $('#startTeam').disabled = state.running; $('#resumeTeam').disabled = state.running; $('#stopTeam').disabled = !state.running;
     $('#teamStatus').textContent = state.running ? state.agents.map(a => a.name + ': ' + a.status).join(' · ') : '团队未运行；端口使用“控制”页配置。';
     const describeScope = scope => !scope || scope.kind === 'whole-module' ? '完整模块' :
@@ -763,6 +908,7 @@ async function refreshTeamRuntime() {
       return tr;
     });
     $('#teamTasks tbody').replaceChildren(...rows);
+    if (!rows.length) $('#teamTasks tbody').innerHTML = '<tr class="empty-row"><td colspan="6">还没有任务。启动小队后，把第一个想法告诉入口伙伴。</td></tr>';
     $('#teamProposals tbody').replaceChildren(...(state.proposals ?? []).map(proposal => {
       const tr = document.createElement('tr');
       for (const value of [proposal.from + ' → ' + proposal.to, proposal.description + ' · ' + describeScope(proposal.scope),
@@ -771,12 +917,12 @@ async function refreshTeamRuntime() {
       }
       return tr;
     }));
+    if (!state.proposals?.length) $('#teamProposals tbody').innerHTML = '<tr class="empty-row"><td colspan="3">伙伴们的协作提案会出现在这里</td></tr>';
     if (!drag && !linkDraft) render();
   } catch (error) { $('#teamStatus').textContent = error.message; }
 }
 refreshTeamRuntime();
 setInterval(refreshTeamRuntime, 2000);
-loadCatalog();
 
 </script>
 </body>

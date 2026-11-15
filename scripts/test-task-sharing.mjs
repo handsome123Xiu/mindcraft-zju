@@ -9,7 +9,7 @@ import { createBuildingTools } from '../src/building/tools.js';
 import { inspectPart, refreshChecklist } from '../src/building/checklist.js';
 
 const spec = TEAM_PRESETS.centralized(['lead', 'alpha', 'beta', 'gamma']);
-assert.equal(spec.rules.assignment, 'lead-assigns');
+assert.equal(spec.coordination, 'relationships');
 const assignment = { version: 1, dimension: 'overworld', blueprint: compileBlueprint({ shapes: [
     { kind: 'box', part: 'floor', min: [0,0,0], max: [3,0,1], block: 'stone' }
 ] }, [10,0,10]) };
@@ -127,14 +127,14 @@ function open(runtime) {
     } finally { runtime.close(); await rm(directory, { recursive: true, force: true }); }
 }
 
-// Design never triggers automatic work, including existing saved legacy rules.
-for (const strategy of ['lead-assigns', 'spatial-parallel']) {
-    const legacy = structuredClone(spec); legacy.rules.assignment = strategy;
+// A design never dispatches automatically, regardless of relation wording.
+for (const strategy of ['自主分工', '空间并行']) {
+    const configured = structuredClone(spec); configured.edges[0].description = strategy;
     let published = 0, dispatched = 0;
     const job = { request: 'Build floor', origin: [10,0,10], dimension: 'overworld', owner: 'tester', assignmentVersion: 0,
         placed: {}, removed: {}, events: [], observation: {}, plan: { requirements: [{ id: 'goal', description: 'Build floor' }], steps: [] } };
     const tools = createBuildingTools({ job, world: { read: () => 'air', snapshot: () => ({ dimension: 'overworld' }) },
-        team: { runtime: true, self: 'lead', spec: () => legacy, async publish() { published++; return { assignmentVersion: 1 }; }, async prepareParallel() { dispatched++; } },
+        team: { runtime: true, self: 'lead', spec: () => configured, async publish() { published++; return { assignmentVersion: 1 }; }, async prepareParallel() { dispatched++; } },
         checkpoint: async () => {}, design: async () => ({ blueprint: assignment.blueprint, summary: 'Floor', shapes: [], coverage: [{ requirementId: 'goal', evidence: 'Eight cells' }] }) });
     await tools.useSkill('design_blueprint', {});
     assert.equal(published, 1);

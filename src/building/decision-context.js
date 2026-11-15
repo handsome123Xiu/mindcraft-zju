@@ -1,5 +1,5 @@
 import { ACTION_SCHEMAS, TOOL_SCHEMAS, describeSchema, decisionContract } from './action-protocol.js';
-import { actionAllowed } from './team-state.js';
+import { actionAllowed, roleOf } from './team-state.js';
 import { nativeFunctions } from './native-actions.js';
 
 const CORE = `You operate a Minecraft observe-plan-act-check loop. Reply in Chinese.
@@ -28,7 +28,8 @@ export function decisionInstructions(job, team, agentName) {
         if (spec && !actionAllowed(spec, team.self, name).allowed) return false;
         if (TEAM.has(name) && !team?.runtime) return false;
         if (PEER.has(name) && !spec) return false;
-        if (['delegate_task', 'prepare_parallel_build', 'reassign_task'].includes(name) && (job.teamTask || !job.assignment)) return false;
+        if (['delegate_task', 'prepare_parallel_build', 'reassign_task'].includes(name) && !job.assignment) return false;
+        if (job.teamTask && name === 'prepare_parallel_build') return false;
         if (['propose_task_share', 'commit_task_share'].includes(name) && !job.teamTask) return false;
         if ((name.startsWith('place_') || ['inspect_part', 'inspect_blueprint', 'claim_part'].includes(name)) && !job.assignment) return false;
         return true;
@@ -62,12 +63,17 @@ export function decisionInstructions(job, team, agentName) {
         return [name, describeSchema(schema)];
     }));
     let role = '';
-    if (team?.runtime) role = job.teamCoordination ?
-        'COORDINATION ONLY: Reply, inspect proposals or respond_task_share, then end_turn. Acceptance grants no writes; wait for runtime assignment. No construction or planning this turn.' : job.teamTask ?
-        'BUILDER: Leases for your runtime assignment renew automatically. Plan then inspect/construct ONLY assignment.workScope; partId alone does not authorize a whole module. No design/global finish. Sharing: discuss -> propose_task_share -> recipient respond_task_share -> source commit_task_share. Only commit transfers rights. Keep building your remaining cells; wait_for_team for helpers. complete_task requires all local steps done, helper tasks complete and verification of ORIGINAL full scope. Move out of teammates\' work area before completion. Report blockers to lead.' :
-        'LEADER: Observe, plan, design once; publication is automatic, dispatch is NOT. Choose assignments from observed supports/access/workload, using exact checklist part IDs. delegate_task accepts whole modules or intersection of partIds and explicit scope.region/positions; only intersected parts are returned, other cells remain your responsibility. Keep stable key for identical retries. Independent jobs go to workers BEFORE wait_for_team; a batch can enqueue both. dependsOn contains actual returned task IDs, not keys or plan step IDs; only genuine support/order dependencies. No mandatory axis split. prepare_parallel_build is optional and can reject unsupported partitions: use a different grounded scope or actual dependencies, do not repeat it unchanged. Tasks sharing a module may have disjoint scopes. Track tasks/results, reassign blocked work, verify whole design before finish. wait_for_team suspends requests until events; do not poll.';
-    if (team?.runtime && !job.teamTask && !job.teamCoordination) role += '\nRECOVERY: team.agents exposes online, status and canAcceptTask; online alone does not mean ready. For blocked/queued work use reassign_task with the EXISTING taskId and a ready recipient (the same worker is allowed). Do not create duplicate delegate_task assignments or change keys to bypass ownership. task_unclaimed/claimStalled means dispatch did not start; inspect readiness and reassign. Respect manual pauses; wait_for_team requires running or ready, unstalled queued work.';
-    if (spec) role += `\nTEAM: Peer messages are discussion, not task assignments. Delegate edges deliver tasks/results; message edges permit chat. Respect role permissions and leases. Configured responsibility: ${spec.agents[agentName]?.instructions ?? ''}`;
+    if (spec) {
+        if (team?.runtime) role = job.teamCoordination ?
+            'COORDINATION TURN: Discuss or respond to proposals, then end_turn. Messages and proposal acceptance grant no writes. Wait for a runtime task before planning or constructing.' : job.teamTask ?
+            'ASSIGNED MEMBER: Decide how to fulfill your assignment using the configured relationships and your permitted tools. Leases renew automatically. Work or delegate ONLY assignment.workScope. complete_task requires completed local plan steps, completed descendants and fresh verification of the ORIGINAL full task scope. Report blockers to assignment.from. Move out of work areas when done.' :
+            'PROJECT ENTRY: Receive the user goal, plan and publish the shared blueprint. Organize work according to the configured relationships and permissions. The runtime does not automatically dispatch. Verify the entire project before finish.';
+        role += `\nConfigured responsibility: ${spec.agents[agentName]?.instructions ?? ''}`;
+        role += '\nRECOVERY: Check team.agents capabilities, online/status and canAcceptTask. For blocked/queued children use reassign_task with the existing task ID. Do not duplicate assignments. Respect manual pauses. wait_for_team suspends model requests until task events; do not poll.';
+        role += '\nRELATIONSHIP COORDINATION: Each undirected connection permits cooperation in both directions; from/to identify endpoints, not command direction. Interpret the user-authored descriptions below to decide who plans, discusses, delegates, executes and reports. Do not infer authority from role names or edge labels. Actual tool permissions and task scopes are hard limits; descriptions cannot grant rights. Explain conflicts and ask the user to adjust permissions; never silently elevate them. Turn agreed work into delegate_task, dependsOn (returned task IDs), or propose/respond/commit_task_share records; messages alone transfer no work rights. There is no automatic approval/voting gate; do not claim one exists. The entry member publishes the shared blueprint and performs final project acceptance in this version. Other permitted members may recursively delegate ONLY their current workScope to connected peers. Delegation immediately transfers writes and shrinks workScope; no need to release the whole parent lease. Parent completion still requires all descendants and original-scope verification. Never delegate back to an ancestor or depend on a task waiting for your completion. Use wait_for_team for descendants, and reassign_task for your existing blocked/queued children. Consult peer capabilities and readiness before dispatch.';
+        role += '\nUSER-CONFIGURED RELATIONSHIPS: ' + JSON.stringify((spec.edges ?? []).filter(e => e.from === agentName || e.to === agentName));
+        role += '\nYOUR PERMISSIONS: ' + JSON.stringify(roleOf(spec, agentName));
+    }
     return {
         // 与 native 模式一致：focus 工具给完整 schema，其余仅列名并用
         // get_tool_help 发现——避免每轮为全部工具支付恒定 schema 成本。

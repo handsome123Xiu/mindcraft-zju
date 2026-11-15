@@ -12,9 +12,8 @@ import { createTeamSupervisor } from '../console/team-supervisor.js';
 import { createBuildingTools } from '../src/building/tools.js';
 
 const spec = TEAM_PRESETS.centralized(['lead', 'alpha', 'beta']);
-// Manual strategy remains covered independently of the automatic preset.
-spec.rules.assignment = 'lead-assigns';
-spec.edges = spec.edges.filter(edge => edge.type === 'delegate');
+// Only direct connections authorize cooperation; no transitive access.
+spec.edges = spec.edges.filter(edge => edge.from === 'lead');
 const assignment = { version: 1, dimension: 'overworld', blueprint: compileBlueprint({ shapes: [
     { kind: 'point', part: 'a', at: [0, 0, 0], block: 'stone' },
     { kind: 'point', part: 'b', at: [2, 0, 0], block: 'stone' }

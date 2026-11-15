@@ -86,7 +86,7 @@ const actions = worker.actionContract.anyOf.map(schema => schema.properties.acti
 assert(!actions.includes('skill') && !actions.includes('finish'));
 assert(actions.includes('complete_task'));
 const names = worker.actionContract.anyOf.find(schema => schema.properties.action.const === 'tool').properties.name.enum;
-assert(!names.includes('delegate_task') && names.includes('propose_task_share'));
+assert(names.includes('delegate_task') && names.includes('propose_task_share'), 'permitted members can delegate their own scopes');
 assert.equal(JSON.parse(worker.turns[0].content).team.assignment.workScope.count, 1);
 const coordination = createDecisionRequest({ ...job, teamCoordination: true }, world, {}, 'builder_2', { ...team, self: 'builder_2' });
 assert.deepEqual(coordination.actionContract.anyOf.map(s => s.properties.action.const), ['tool','batch','end_turn','blocked']);

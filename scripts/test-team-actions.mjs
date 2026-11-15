@@ -18,18 +18,18 @@ parseAction('{"action":"tool","name":"query_claims","args":{}}');
 for (const [name, preset] of Object.entries(TEAM_PRESETS)) {
     assert.equal(validateTeamSpec(preset(['alpha', 'beta', 'gamma'])).ok, true, name + ' 预设应有效');
 }
-assert.equal(validateTeamSpec(TEAM_PRESETS.pipeline(['alpha', 'beta'])).ok, true);
+assert.equal(validateTeamSpec(TEAM_PRESETS.hierarchy(['alpha', 'beta'])).ok, true);
 {
-    const disconnected = validateTeamSpec({ agents: { a: { role: 'builder' }, b: { role: 'builder' }, c: { role: 'builder' } },
-        edges: [{ from: 'a', to: 'b', type: 'message' }], rules: {} });
+    const disconnected = validateTeamSpec({ ...TEAM_PRESETS.centralized(['a', 'b', 'c']),
+        edges: [{ from: 'a', to: 'b', description: '共同施工' }] });
     assert(!disconnected.ok && disconnected.errors.some(e => e.includes('不连通')));
-    const cyclic = validateTeamSpec({ agents: { a: { role: 'builder' }, b: { role: 'builder' } },
-        edges: [{ from: 'a', to: 'b', type: 'delegate' }, { from: 'b', to: 'a', type: 'delegate' }], rules: {} });
-    assert(!cyclic.ok && cyclic.errors.some(e => e.includes('环')));
-    const leadless = validateTeamSpec({ agents: { a: { role: 'builder' }, b: { role: 'builder' } },
-        edges: [{ from: 'a', to: 'b', type: 'message' }], rules: { finish: 'lead-gates' } });
-    assert(!leadless.ok && leadless.errors.some(e => e.includes('lead')));
-    assert(!validateTeamSpec({ agents: { a: { role: 'wizard' } }, edges: [], rules: {} }).ok);
+    const graph = TEAM_PRESETS.peers(['a', 'b', 'c']);
+    assert(validateTeamSpec(graph).ok, 'communication cycles are valid');
+    const duplicate = validateTeamSpec({ ...graph, edges: [...graph.edges, { from: 'b', to: 'a', description: '重复关系' }] });
+    assert(!duplicate.ok && duplicate.errors.some(e => e.includes('一条关系')));
+    const leadless = validateTeamSpec({ ...graph, agents: { ...graph.agents, a: { role: 'builder' } } });
+    assert(!leadless.ok && leadless.errors.some(e => e.includes('入口')));
+    assert(!validateTeamSpec({ coordination: 'relationships', agents: { a: { role: 'wizard' } }, edges: [] }).ok);
 }
 
 // Role permissions: lead all, builder no design, inspector read-only.
@@ -82,9 +82,8 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
     const job = { origin: [0, 0, 0], dimension: 'overworld', owner: 'user', placed: {}, removed: {}, placementAttempts: 0,
         assignment: { version: 1, dimension: 'overworld', blueprint }, assignmentVersion: 1,
         plan: { requirements: [{ id: 'goal', description: '团队测试' }], steps: [] }, events: [] };
-    const spec = { agents: { alpha: { role }, beta: { role: 'builder' } },
-        edges: [{ from: 'beta', to: 'alpha', type: 'message' }],
-        rules: { assignment: 'first-claim', handoff: 'agent-driven', finish: 'any-gates' } };
+    const spec = { coordination: 'relationships', entryAgent: 'beta', agents: { alpha: { role }, beta: { role: 'lead' } },
+        edges: [{ from: 'beta', to: 'alpha', description: '协作施工' }] };
     const claims = { version: 1, claims: othersHeld };
     const team = {
         self: 'alpha',
@@ -169,7 +168,7 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
         read: pos => blocks.get(pos.join(',')) ?? 'air',
         snapshot: () => ({ dimension: 'overworld', position: [0, 0, 4], gameMode: 'creative' }), async prepare() {}
     }, model: { async sendRequest(turns) { calls.push(turns); return script.shift() ?? JSON.stringify({ action: 'blocked', reason: 'end' }); } },
-        team: { self: 'builder_2', runtime: true, spec: () => ({ agents: {}, rules: {}, edges: [] }),
+        team: { self: 'builder_2', runtime: true, spec: () => ({ coordination: 'relationships', agents: {}, edges: [] }),
             async refresh(job) { job.teamContext = { tasks: [{ id: 'other', status: 'running', to: 'builder_1', dependsOn: [], parentId: null }] }; } },
         async save() {} });
     controller.restore({ version: 1, kind: 'building-loop', id: 'dead-run', teamRunId: 'dead-run',
@@ -186,6 +185,41 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
     const feedbacks = controller.snapshot().events.filter(e => e.kind === 'feedback');
     assert(feedbacks.some(e => String(e.output?.message ?? '').includes('complete_task')), '守卫反馈指明 complete_task');
     assert(feedbacks.some(e => String(e.output?.message ?? '').includes('后续层属于其他排队任务')), '反馈说明范围外层不是完成条件');
+}
+
+// 自定义协作范式：内联 permissions、自由角色名、能力锚定校验、kind 边。
+{
+    const { validateTeamSpec, capabilities, roleOf } = await import('../src/building/team-state.js');
+    // 合法自定义 spec：军师（只读白名单）+ 全权 chief + builder，kind 边带标签。
+    const custom = { coordination: 'relationships', agents: {
+        chief: { role: 'chief', permissions: { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true } },
+        advisor: { role: 'advisor', permissions: { allow: ['observe_environment', 'send_message'], whitelistOnly: true } },
+        w1: { role: 'builder' } },
+        edges: [{ from: 'chief', to: 'w1', description: 'chief 分配工作，w1 执行并汇报', label: '师徒' },
+            { from: 'chief', to: 'advisor', description: 'chief 向 advisor 咨询意见', label: '问策' }], entryAgent: 'chief' };
+    const ok = validateTeamSpec(custom);
+    assert(ok.ok, '合法自定义 spec 通过：' + ok.errors.join(';'));
+    assert.deepEqual(capabilities(custom, 'chief'), { name: 'chief', canBuild: true, canDelegate: true, blueprintAuthority: true, finishGate: true });
+    assert.equal(capabilities(custom, 'advisor').canBuild, false, '白名单军师无施工权');
+    assert.equal(roleOf(custom, 'advisor').allow.includes('design_blueprint'), false, '白名单不隐含设计权');
+    assert.equal(roleOf(custom, 'chief').name, 'chief', '自定义角色名保留');
+
+    // 非法：自定义角色无 permissions；未知工具名；lead-gates 无 finishGate 持有者。
+    const bad1 = validateTeamSpec({ agents: { a: { role: 'wizard' } }, edges: [] });
+    assert(bad1.errors.some(e => e.includes('permissions')), '自定义角色必须带 permissions');
+    const bad2 = validateTeamSpec({ agents: { a: { role: 'x', permissions: { allow: ['not_a_tool'], whitelistOnly: true } } }, edges: [] });
+    assert(bad2.errors.some(e => e.includes('未知工具')), '未知工具名被拒绝');
+    const bad3 = validateTeamSpec({ coordination: 'relationships', agents: { a: { role: 'builder' } }, edges: [] });
+    assert(bad3.errors.some(e => e.includes('全局验收')), 'lead-gates 锚定 finishGate 而非 lead 头衔');
+
+    const old = { agents: { l: { role: 'lead' }, w: { role: 'builder' } },
+        edges: [{ from: 'l', to: 'w', type: 'delegate' }] };
+    assert(!validateTeamSpec(old).ok, 'old graphs must cross the explicit migration boundary');
+    const coleads = TEAM_PRESETS.peers(['l1', 'l2', 'w']);
+    coleads.agents.l2 = { role: 'lead' };
+    assert(validateTeamSpec(coleads).ok, 'role titles do not decide the project entry');
+    assert(!validateTeamSpec({ ...coleads, rules: { finish: 'any-gates' } }).ok, 'old rule enums are rejected');
+
 }
 
 console.log('Team coordination checks passed: lease tools in catalog, spec validation and presets, role permissions, lease exclusivity/TTL, tool-layer gating with and without a team.');

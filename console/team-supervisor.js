@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { createTeamRuntime, entryAgent } from '../src/building/team-runtime.js';
-import { validateTeamSpec } from '../src/building/team-state.js';
+import { validateTeamSpec, capabilities } from '../src/building/team-state.js';
 import { BUILDING_MODEL_APIS } from '../src/building/model.js';
 
 export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
@@ -26,8 +26,7 @@ export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
                 const validation = validateTeamSpec(spec);
                 if (!validation.ok) throw new Error(validation.errors.join('；'));
                 const entry = entryAgent(spec);
-                if (spec.agents[entry]?.role !== 'lead') throw new Error('第一阶段需要一个 lead 作为团队入口和蓝图协调者');
-                if (spec.edges.some(edge => edge.type === 'delegate' && edge.from !== entry)) throw new Error('整体派单线需从团队入口 ' + entry + ' 出发；builder 局部协作请配置双向消息线，并通过协作提案交接');
+                if (!capabilities(spec, entry).blueprintAuthority) throw new Error('团队入口需要蓝图权威（blueprintAuthority）角色，负责规划与派单');
                 const mcPort = Number(port ?? settings.port);
                 if (!Number.isInteger(mcPort) || mcPort < 1 || mcPort > 65535) throw new Error('请设置有效的 Minecraft LAN 端口');
                 const configs = [];
@@ -39,7 +38,7 @@ export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
                     configs.push({ name, file });
                 }
                 runtime?.close();
-                runtime = createTeamRuntime({ spec, path: join(root, 'bots', 'team-runtime.sqlite'), pauseOnRestore: true });
+                runtime = createTeamRuntime({ spec, path: join(root, 'bots', 'team-runtime.sqlite'), pauseOnRestore: true, archiveLegacyRuns: fresh });
                 // Reconcile legacy/crash-interrupted failures before topology checks.
                 for (const run of runtime.snapshot().runs.filter(run => run.status === 'active')) {
                     if (fresh) {
@@ -59,9 +58,9 @@ export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
                 }
                 const previous = runtime.snapshot().runs.filter(run => run.status === 'active').at(-1);
                 if (previous) {
-                    const topology = value => JSON.stringify({ entry: entryAgent(value),
-                        agents: Object.entries(value.agents).map(([name, node]) => [name, node.role]).sort(),
-                        edges: value.edges.map(edge => [edge.from, edge.to, edge.type].join(':')).sort() });
+                    const topology = value => JSON.stringify({ entry: entryAgent(value), coordination: value.coordination,
+                        agents: Object.entries(value.agents).map(([name, node]) => [name, node.role, JSON.stringify(node.permissions ?? null), node.instructions ?? '']).sort(),
+                        edges: (value.edges ?? []).map(edge => JSON.stringify([[edge.from, edge.to].sort(), edge.description ?? '', edge.label ?? '', edge.note ?? ''])).sort() });
                     if (topology(previous.spec) !== topology(spec)) throw new Error('恢复旧工程需要原成员和连线；如需使用新结构，请选择“保存并开始新测试”');
                 }
                 for (const { name, file } of configs) {

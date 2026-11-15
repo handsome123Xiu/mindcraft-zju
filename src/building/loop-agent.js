@@ -40,7 +40,6 @@ export function createDecisionRequest(job, world, budget, agentName = 'builder',
         blueprint: job.assignment ? { version: job.assignmentVersion, bounds: job.assignment.blueprint.bounds,
             blocks: job.assignment.blueprint.blocks.length, design: job.design } : null,
         team: team?.spec() ? { self: team.self, role: roleOf(team.spec(), team.self).name,
-            rules: team.spec().rules,
             edges: team.spec().edges,
             runtime: team.runtime ?? false,
             // 紧凑任务视图：完整记录（长描述/凭据/scope）由 list_tasks 按需读取。
@@ -433,8 +432,8 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                         if (job.teamTask) throw new Error('请用 complete_task 完成自己的委托部件');
                         if (team?.spec()) {
                             const role = roleOf(team.spec(), team.self);
-                            if (team.spec().rules?.finish === 'lead-gates' && !role.finishGate) {
-                                throw new Error('团队规则 finish=lead-gates：全局验收由 lead 提交。请向 lead 报告你的部件完成（send_message），由 lead 统一 finish');
+                            if (!role.finishGate) {
+                                throw new Error('缺少全局验收权限，请向团队入口汇报完成情况');
                             }
                         }
                         const inspection = tools.inspect();
