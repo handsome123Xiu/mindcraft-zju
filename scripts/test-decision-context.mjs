@@ -132,4 +132,54 @@ try {
 const track = createProgressTracker(job, { snapshot: () => world });
 assert(track({ action: 'tool', name: 'delegate_task' }, { taskId: 'new-task', status: 'queued' }).progressed);
 assert(!track({ action: 'tool', name: 'delegate_task' }, { taskId: 'new-task', status: 'queued' }).progressed, 'same retry is not progress');
+
+// 上下文瘦身：团队生命周期只进短 feed；任务视图紧凑；重复大块（checklist/
+// inspect_build）在 recentEvents 只留元数据；JSON 指令仅给 focus 工具完整 schema。
+{
+    const heavyJob = { ...job,
+        teamContext: { tasks: [{ id: 't1', key: 'k', to: 'builder_1', partIds: ['part-1'], status: 'completed',
+            attempt: 1, dependsOn: [], description: '长'.repeat(200), summary: '果'.repeat(200), scope: null,
+            evidence: [{ partId: 'part-1', total: 3, remaining: 0 }] },
+            { id: 't2', key: 'k2', to: 'builder_2', partIds: ['part-2'], status: 'blocked', attempt: 2, dependsOn: ['t1'],
+                description: '阻'.repeat(120), reason: '因'.repeat(200), scope: { region: { min: [0,0,0], max: [3,3,3] } } }],
+            proposals: [], peers: [] },
+        teamFeed: [{ at: 't', kind: 'task_unclaimed', from: 'runtime', text: '[团队 task_unclaimed] 超时未领取' }],
+        events: [...job.events,
+            { kind: 'feedback', name: 'get_build_checklist', input: {}, output: { status: 'observed',
+                checklist: { verifiedParts: 0, totalParts: 2, remainingCells: 5, nextPartId: 'part-1', parts: [{ id: 'part-1' }, { id: 'part-2' }] } } },
+            { kind: 'feedback', name: 'inspect_build', input: {}, output: { status: 'blocked',
+                differences: Array.from({ length: 40 }, (_, i) => ({ pos: [i,0,0], reason: 'missing' })),
+                differenceCount: 40, differenceReasons: { missing: 40 }, verified: 3 } }] };
+    const view = createDecisionRequest(heavyJob, world, {}, 'lead', team);
+    const ctx = JSON.parse(view.turns[0].content);
+    // 任务紧凑视图：长文本截断、scope 摘要化、凭据不携带。
+    const t1 = ctx.team.tasks.find(task => task.id === 't1');
+    assert.equal(t1.description.length, 81, '描述截到 80 字符 + 省略号');
+    assert(t1.description.endsWith('…'));
+    assert(t1.summary.length <= 101);
+    assert.equal(t1.evidence, undefined, '完成凭据不进上下文，走 list_tasks');
+    const t2 = ctx.team.tasks.find(task => task.id === 't2');
+    assert(t2.reason.length <= 121);
+    assert.equal(t2.scope.kind, 'region');
+    assert.deepEqual(ctx.team.feed, heavyJob.teamFeed);
+    // checklist/inspect_build 事件只留计数元数据。
+    const checklistEvent = ctx.recentEvents.find(event => event.name === 'get_build_checklist');
+    assert.deepEqual(Object.keys(checklistEvent.output).sort(), ['details', 'nextPartId', 'remainingCells', 'status', 'totalParts', 'verifiedParts']);
+    const inspectionEvent = ctx.recentEvents.find(event => event.name === 'inspect_build');
+    assert.equal(inspectionEvent.output.differenceCount, 40);
+    assert.equal(inspectionEvent.output.differences, undefined, '差异坐标走 inspect_build 重查');
+    // JSON 指令：focus 工具有完整 schema，非 focus 仅列名。
+    assert(view.instructions.includes('"place_block"'));
+    const toolsLine = view.instructions.split('\n').find(line => line.startsWith('TOOLS'));
+    const otherLine = view.instructions.split('\n').find(line => line.includes('get exact fields via get_tool_help'));
+    assert(otherLine && otherLine.includes('query_claims'), '非 focus 工具只列名并指向 get_tool_help');
+    assert(toolsLine.length < 2600, 'focus schema 行不随工具目录整体膨胀');
+    // 最坏情况上下文上限（40 条千字消息 + 大清单 + 双任务）。
+    const worst = { ...heavyJob, messages: Array.from({ length: 40 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user',
+        ...(i % 2 ? { to: 'tester' } : { from: 'tester' }), content: '字'.repeat(1000) })) };
+    const worstView = createDecisionRequest(worst, world, {}, 'lead', team);
+    assert(JSON.parse(worstView.turns[0].content).messages.length === 40);
+    assert(worstView.turns[0].content.length < 62000, '最坏上下文仍远小于响应截断上限');
+}
+
 console.log('Decision context checks passed: immutable obligations, compact history, paged retrieval, role protocols, batch preflight and intersected concurrent scopes.');

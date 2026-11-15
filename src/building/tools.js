@@ -5,6 +5,7 @@ import { compilePlacement, executePlacement, PLACEMENT_ACTIONS } from './placeme
 import { ACTION_SCHEMAS, TOOL_SCHEMAS, validateToolArgs } from './action-protocol.js';
 import { DEMOLITION_ACTIONS, compileDemolition, extendDemolitionTarget, inspectDemolition } from './demolition.js';
 import { scanEnvironment, scanCells } from './observation.js';
+import { rememberObservation, rememberBlockObservation, markObservationsStale } from './observation-memory.js';
 import { assertMaterial, placementNotes } from './materials.js';
 import { checklistParts, taskChecklistParts, refreshChecklist, inspectPart } from './checklist.js';
 import { partitionBuilding, verifyParallelSite } from './parallel-building.js';
@@ -30,8 +31,8 @@ export const TOOL_CATALOG = Object.freeze([
         description: 'Give up your lease on a part so a teammate can take it. Release parts you no longer need; your own claims can be re-claimed freely.' },
     { name: 'query_claims', args: '{}',
         description: 'Read the current team lease table: which teammate holds which part and when it expires. Check before choosing your next part to avoid conflicts.' },
-    { name: 'observe_environment', args: '{region?: {min:[x,y,z],max:[x,y,z]}}',
-        description: 'Read a region (each edge <=256, volume<=2000000, within 256 of task origin). Default scans near origin. blocks filters exact names; excludeBlocks hides ground etc. offset/limit page matching cells; follow nextOffset until null. Counts cover the full region. Truncated cells are NOT air.' },
+    { name: 'observe_environment', args: '{region: {min:[x,y,z],max:[x,y,z]}}',
+        description: 'Choose an explicit world-coordinate region from the task, expected footprint/height, access needs and current facts; there is no default scan. Expand or change the region when evidence is insufficient. Each edge <=256, volume<=2000000, within 256 of task origin. blocks filters exact names; excludeBlocks hides ground etc. offset/limit page matching cells; follow nextOffset until null. Counts cover the full region. Truncated cells are NOT air.' },
     { name: 'observe_cells', args: '{positions:[[x,y,z],...],coordinateSpace?:"world|blueprint"}',
         description: 'Read exactly the listed cells (up to 256), anywhere within 256 of task origin, without scanning a whole region. Use it for scattered spots: samples across a large site, specific blueprint cells, or rechecking a few failure coordinates. Every requested position is reported once with its block; unloaded cells are listed separately and are NOT air. Does not replace observe_environment for terrain overview.' },
     { name: 'inspect_block', args: '{position:[x,y,z]}',
@@ -56,11 +57,11 @@ export const TOOL_CATALOG = Object.freeze([
     { name: 'set_demolition_target', args: '{region:{min,max},blocks?:["sandstone"]}',
         description: 'For standalone demolition, register the explicitly chosen loaded region to verify as air. Optional blocks selects observed material names. Without a filter the whole region must become air. Repeated calls only add targets, never discard unfinished ones. Does not dig. Use before demolition; finish needs this target, not a construction blueprint.' },
     { name: 'move_to', args: '{position:[x,y,z]}',
-        description: 'Move to an observed supported standing cell. Walk first; a stalled or failed walk in creative mode automatically tries collision-checked flight around/over obstacles and lands. When hovering, fly and land directly. No digging or scaffolding. Observe again after moving.' },
+        description: 'Move to an observed supported standing cell. Walk first; a stalled or failed walk in creative mode automatically tries collision-checked flight around/over obstacles and lands. When hovering, fly and land directly. No digging or scaffolding. Prior observations remain available with a movement uncertainty marker; recheck only facts needed next.' },
     { name: 'fly_to', args: '{position:[x,y,z]}',
-        description: 'Creative flight to an observed empty feet cell, then hover. Checks body clearance, loaded chunks, world height and worksite bounds. Tries direct, rise/across/descend and 3D detours; if all routes are blocked by walls, it can phase through them to escape (the server may correct it). Only lands in clear supported cells. Observe again after flying. Placement tools can also fly automatically to reach high faces.' },
+        description: 'Creative flight to an observed empty feet cell, then hover. Checks body clearance, loaded chunks, world height and worksite bounds. Tries direct, rise/across/descend and 3D detours; if all routes are blocked by walls, it can phase through them to escape (the server may correct it). Only lands in clear supported cells. Retain prior observations; choose any necessary local rechecks. Placement tools can also fly automatically to reach high faces.' },
     { name: 'land_at', args: '{position:[x,y,z]}',
-        description: 'Fly to an empty feet cell above a full solid support and land, restoring walking physics. Never disables flight in midair. Observe again after landing.' },
+        description: 'Fly to an empty feet cell above a full solid support and land, restoring walking physics. Never disables flight in midair. Retain prior observations; choose any necessary local rechecks.' },
     { name: 'dig_block', args: '{position:[x,y,z],expectedBlock:"stone"}',
         description: 'Remove one observed block within 256 of origin. Pass exact expectedBlock; recheck after approaching and verify air. Can fly to reach it. No automatic replacement.' },
     ...['row', 'rectangle', 'cube'].map(shape => ({ name: 'dig_' + shape,
@@ -191,6 +192,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
     async function digOne(position, expected, signal) {
         const key = position.join(',');
         const before = world.read(position);
+        markObservationsStale(job, 'demolition_attempt');
         if (before == null) return { status: 'blocked', reason: 'unloaded', position };
         if (before === 'air') {
             job.removed ??= {};
@@ -205,7 +207,6 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
         try { reason = await world.digBlock(position, expected, signal); }
         finally {
             job.lastInspection = null;
-            job.observation = null;
             if (world.read(position) === 'air') {
                 job.removed ??= {};
                 job.removed[key] = before;
@@ -270,7 +271,6 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             if (job.demolition) throw new Error('本任务已有拆除目标，不能通过新建蓝图替代拆除验收');
             snapshot();
             if (!job.plan.requirements.length) throw new Error('先用 update_plan 记录原始需求和整体计划');
-            if (!job.observation) throw new Error('先观察环境，再设计蓝图');
             const origin = args.origin == null ? job.origin : coordinates(args.origin, '设计原点');
             nearSite(origin, 16);
             if (job.originLocked && origin.some((n, i) => n !== job.origin[i])) throw new Error('用户指定的施工原点不能移动');
@@ -279,7 +279,8 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                 origin, signal, runId: job.id, context: {
                     originalGoal: job.request, requirements: job.plan.requirements, userClarifications: job.clarifications ?? [], supportedMaterials: supportedMaterials(),
                     constructionChecklist: refreshChecklist(job, world),
-                    observation: job.observation, previousDesign: job.design ?? null,
+                    observation: job.observation ?? null, blockObservations: job.blockObservations ?? [],
+                    world: snapshot(), previousDesign: job.design ?? null,
                     feedback: job.events.filter(event => event.kind === 'feedback').slice(-6).map(event => ({
                         name: event.name, status: event.output?.status, message: event.output?.message,
                         reason: event.output?.reason, field: event.output?.field, expected: event.output?.expected,
@@ -338,7 +339,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             teamGate(name);
             if (name === 'get_tool_help') {
                 if (args.name === 'design_blueprint') return { status: 'observed', name: args.name,
-                    description: 'Plan and observe first. Origin may move at most 16 blocks from the task origin unless locked by the user. Design alone; publication checks all target and explicit air cells for conflicts. Builders cannot redesign. After success delegate independent tasks before waiting.',
+                    description: 'Plan first; reuse sufficient observations or block inspections, and choose additional reads only for missing or uncertain facts. No mandatory scan before each design. Origin may move at most 16 blocks from the task origin unless locked by the user. Design alone; publication checks all target and explicit air cells for conflicts. Builders cannot redesign. After success delegate independent tasks before waiting.',
                     parameters: ACTION_SCHEMAS.skill.properties.args };
                 const tool = TOOL_CATALOG.find(tool => tool.name === args.name);
                 if (!tool) throw new Error('未知工具；请从当前 TOOLS 中选择名称');
@@ -419,21 +420,19 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                         .map(material => [material, placementNotes(material)]).filter(([, notes]) => notes.length)) };
             }
             if (name === 'observe_environment') {
-                const region = bounds(args.region ?? {
-                    min: job.origin.map((n, i) => n - (i === 1 ? 1 : 5)),
-                    max: job.origin.map((n, i) => n + (i === 1 ? 6 : 5))
-                });
+                const region = bounds(args.region);
                 nearSite(region.min);
                 nearSite(region.max);
-                job.observation = { ...state, ...scanEnvironment(region, world, args) };
-                return job.observation;
+                const observation = { ...state, ...scanEnvironment(region, world, args) };
+                rememberObservation(job, observation);
+                return observation;
             }
             if (name === 'observe_cells') {
                 for (const position of args.positions) nearSite(coordinates(position, '观察坐标'));
                 const sampled = scanCells(args.positions, world);
-                // 点样本同样满足设计前的观察门禁：世界快照 + 样本就是当前现场事实。
-                job.observation = { ...state, kind: 'cells', ...sampled };
-                return job.observation;
+                const observation = { ...state, kind: 'cells', positions: args.positions, ...sampled };
+                rememberObservation(job, observation);
+                return observation;
             }
             if (name === 'inspect_build') return inspect();
             if (name === 'get_build_checklist') return { status: 'observed', checklist: refreshChecklist(job, world) };
@@ -462,7 +461,11 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             if (name === 'inspect_block' || name === 'look_at') {
                 const position = coordinates(args.position, '目标坐标');
                 nearSite(position);
-                if (name === 'inspect_block') return world.inspectBlock(position);
+                if (name === 'inspect_block') {
+                    const result = await world.inspectBlock(position);
+                    rememberBlockObservation(job, { ...result, position }, state);
+                    return result;
+                }
                 const orientation = await world.lookAt(position, signal);
                 signal?.throwIfAborted();
                 return { status: 'looked', position, ...orientation };
@@ -471,9 +474,10 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                 const position = coordinates(args.position, '移动目标');
                 nearSite(position);
                 const method = { move_to: 'moveTo', fly_to: 'flyTo', land_at: 'landAt' }[name];
-                const result = await world[method](position, signal);
+                let result;
+                try { result = await world[method](position, signal); }
+                finally { markObservationsStale(job, 'movement'); }
                 signal?.throwIfAborted();
-                job.observation = null;
                 const actual = world.snapshot().position;
                 const reached = result && Array.isArray(actual) && actual.length === 3 &&
                     actual.every((n, i) => Number.isFinite(n) && Math.floor(n) === position[i]);
@@ -559,7 +563,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                         team?.runtime && !partKeys?.has(pos.join(',')) ? undefined : planned.get(pos.join(',')) }, placeSignal); }
                     finally {
                         const afterPosition = world.snapshot().position;
-                        if (beforePosition?.some((n, i) => n !== afterPosition?.[i])) job.observation = null;
+                        if (beforePosition?.some((n, i) => n !== afterPosition?.[i])) markObservationsStale(job, 'movement');
                         for (const pos of affected) if (world.read(pos) === cell.block) {
                             const key = pos.join(',');
                             job.placed[key] = cell.block;
@@ -574,6 +578,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
                 } finally {
                     // The outer loop writes a checkpoint on success, failure and interruption.
                     job.lastInspection = null;
+                    markObservationsStale(job, 'placement_attempt');
                 }
                 job.lastPlacement = compactResult(result);
                 refreshChecklist(job, world);

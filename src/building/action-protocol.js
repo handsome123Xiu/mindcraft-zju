@@ -33,7 +33,7 @@ export const TOOL_SCHEMAS = Object.freeze({
     claim_part: object({ partId: string }, ['partId']),
     release_part: object({ partId: string }, ['partId']),
     query_claims: object({}),
-    observe_environment: object({ region, blocks: array(string, 32), excludeBlocks: array(string, 32), ...paging }),
+    observe_environment: object({ region, blocks: array(string, 32), excludeBlocks: array(string, 32), ...paging }, ['region']),
     observe_cells: object({ positions: array(vector, 256), coordinateSpace }, ['positions']),
     inspect_block: object({ position: vector, coordinateSpace }, ['position']),
     look_at: object({ position: vector, coordinateSpace }, ['position']),
@@ -58,6 +58,9 @@ export const TOOL_SCHEMAS = Object.freeze({
 
 const step = object({ id: string, title: { ...string, maxLength: 200 }, success: { ...string, maxLength: 500 },
     depends_on: array(string, 200), status: { enum: ['pending', 'running', 'done', 'blocked'] }, evidence: string }, ['id']);
+// Empty evidence is valid for unfinished steps; updatePlan checks done evidence.
+// title/success stay schema-optional because patch=true merges them from the
+// stored step; validatePlanSubmission enforces them for full submissions.
 // Empty evidence is valid for unfinished steps; updatePlan checks done evidence.
 step.properties.evidence = { type: 'string', maxLength: 1000 };
 export const ACTION_SCHEMAS = Object.freeze({
@@ -135,6 +138,25 @@ export function validateBatchStep(name, args) {
     delete schema.properties.action;
     schema.required = schema.required.filter(field => field !== 'action');
     validateSchema(args, schema, 'args', 'INVALID_ARGUMENT');
+    validatePlanSubmission(args);
+}
+
+// Full plan submissions must be complete at parse time. A missing title/success
+// used to surface only at execution as INVALID_PLAN, which the protocol-failure
+// counter ignored — logs show the same broken plan retried up to 9 times.
+// patch=true steps merge their stored counterparts, so only id is required here;
+// appended new IDs are checked against the stored plan inside updatePlan.
+export function validatePlanSubmission(args) {
+    if (args?.patch === true) return;
+    (args?.steps ?? []).forEach((step, index) => {
+        for (const field of ['title', 'success']) {
+            const value = step?.[field];
+            if (typeof value !== 'string' || !value.trim() || value.length > (field === 'title' ? 200 : 500))
+                throw protocolError(`steps[${index}].${field}`,
+                    '新步骤必须包含 ' + field + '；success 是可观察的完成标准，evidence 不能替代它',
+                    { id: step?.id, title: '拆除并验收目标区域', success: '登记目标全部为空气', status: 'running' }, 'INVALID_ARGUMENT');
+        }
+    });
 }
 
 export function parseAction(text) {
@@ -194,6 +216,7 @@ export function parseAction(text) {
     const schema = Object.hasOwn(ACTION_SCHEMAS, action.action) && ACTION_SCHEMAS[action.action];
     if (!schema) throw protocolError('action', '未知决策 action：' + String(action.action), Object.keys(ACTION_SCHEMAS));
     validateSchema(action, schema);
+    if (action.action === 'update_plan') validatePlanSubmission(action);
     if (action.action === 'tool') validateToolArgs(action.name, action.args);
     // Validate the WHOLE batch before executing its first step. A malformed
     // later step must not leave earlier side effects behind.

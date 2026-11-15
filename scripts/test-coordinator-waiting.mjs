@@ -79,7 +79,7 @@ for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event
             }
             const context = JSON.parse(turns[0].content);
             if (alerted && context.team.tasks.some(task => task.claimStalled)) {
-                assert(context.messages.some(message => message.content.includes('task_unclaimed')));
+                assert(context.team.feed.some(item => item.text.includes('task_unclaimed')), 'lifecycle notice arrives via team.feed');
                 // A new decision is made with an actionable task ID. Reassign
                 // through the real tool; the fixture worker then claims it.
                 const task = context.team.tasks.find(task => task.claimStalled);

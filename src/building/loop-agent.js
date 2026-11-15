@@ -12,9 +12,14 @@ import { checklistParts } from './checklist.js';
 import { decisionInstructions, recentModelEvents, compactDecisionContext, actionStats } from './decision-context.js';
 import { roleOf } from './team-state.js';
 import { scopeSummary, taskScope } from './task-scope.js';
+import { markObservationsStale } from './observation-memory.js';
 
 class LoopLimitError extends Error {}
 class InputChangedError extends Error {}
+
+// update_plan semantic failures must carry INVALID_PLAN so the loop's recovery
+// hint and field/expected diagnostics reach the model; plain Errors only retry blindly.
+const planError = (field, message, expected) => protocolError(field, message, expected, 'INVALID_PLAN');
 
 export function createDecisionRequest(job, world, budget, agentName = 'builder', team = null) {
     const context = {
@@ -24,7 +29,7 @@ export function createDecisionRequest(job, world, budget, agentName = 'builder',
         coordinationOnly: job.teamCoordination ?? false,
         planProtocol: { existingRequirements: 'read-only; omit requirements when updating steps', progress: 'steps[].status and steps[].evidence' },
         origin: job.origin, originLocked: job.originLocked, siteIssue: job.siteIssue,
-        plan: job.plan, world, observation: job.observation,
+        plan: job.plan, world, observation: job.observation, blockObservations: job.blockObservations ?? [],
         materialCatalog: { lookup: 'list_materials', policy: 'Any registry block item is allowed (gravity and special-placement blocks included; list_materials returns placementNotes). On failure read the hints in the result, analyze and fix it yourself (substitute an equivalent block, adjust order/stance), retry up to 2 times, and only then report to teammates/the user.' },
         constructionChecklist: job.teamTask && job.checklist ? { ...job.checklist,
             parts: job.checklist.parts.filter(p => job.teamTask.partIds.includes(p.id)),
@@ -38,7 +43,17 @@ export function createDecisionRequest(job, world, budget, agentName = 'builder',
             rules: team.spec().rules,
             edges: team.spec().edges,
             runtime: team.runtime ?? false,
-            tasks: job.teamContext?.tasks,
+            // 紧凑任务视图：完整记录（长描述/凭据/scope）由 list_tasks 按需读取。
+            tasks: (job.teamContext?.tasks ?? []).map(task => {
+                const view = { id: task.id, key: task.key, to: task.to, partIds: task.partIds, status: task.status,
+                    attempt: task.attempt, dependsOn: task.dependsOn, ...(task.claimStalled ? { claimStalled: true } : {}),
+                    ...(task.parentId ? { parentId: task.parentId } : {}), scope: scopeSummary(task.scope) };
+                if (task.description) view.description = task.description.slice(0, 80) + (task.description.length > 80 ? '…' : '');
+                if (task.status === 'completed' && task.summary) view.summary = task.summary.slice(0, 100) + (task.summary.length > 100 ? '…' : '');
+                if (task.status !== 'completed' && task.reason) view.reason = task.reason.slice(0, 120) + (task.reason.length > 120 ? '…' : '');
+                return view;
+            }),
+            feed: job.teamFeed ?? [],
             unallocatedWork: !job.teamTask ? job.teamContext?.allocation?.filter(part => part.unallocated > 0 &&
                 job.checklist?.parts.some(item => item.id === part.partId && item.remaining > 0)) : undefined,
             proposals: job.teamContext?.proposals ?? [],
@@ -65,7 +80,7 @@ export function createDecisionRequest(job, world, budget, agentName = 'builder',
 function updatePlan(job, action) {
     const requirements = new Map(job.plan.requirements.map(item => [item.id, item]));
     const preservedRequirements = [];
-    if (action.requirements != null && !Array.isArray(action.requirements)) throw new Error('requirements 必须是数组');
+    if (action.requirements != null && !Array.isArray(action.requirements)) throw planError('requirements', 'requirements 必须是数组');
     for (const entry of action.requirements ?? []) {
         const id = requiredText(entry?.id, '需求 ID', 40);
         const description = requiredText(entry.description, '需求描述');
@@ -75,34 +90,39 @@ function updatePlan(job, action) {
         }
         requirements.set(id, { id, description });
     }
-    if (requirements.size > 200) throw new Error('最多记录 200 项需求');
-    if (!Array.isArray(action.steps) || !action.steps.length || action.steps.length > 200) throw new Error('整体计划需要 1–200 步');
+    if (requirements.size > 200) throw planError('requirements', '最多记录 200 项需求');
+    if (!Array.isArray(action.steps) || !action.steps.length || action.steps.length > 200) throw planError('steps', '整体计划需要 1–200 步');
     const previous = new Map(job.plan.steps.map(step => [step.id, step]));
-    if (new Set(action.steps.map(step => step.id)).size !== action.steps.length) throw new Error('步骤 ID 重复');
-    if (action.patch && action.steps.some(step => !previous.has(step.id))) throw new Error('patch 只能更新已有步骤 ID；新增步骤请提交完整 steps');
+    if (new Set(action.steps.map(step => step.id)).size !== action.steps.length) throw planError('steps', '步骤 ID 重复');
     const incoming = new Map(action.steps.map(step => [step.id, step]));
-    const entries = action.patch ? job.plan.steps.map(step => ({ ...step, ...incoming.get(step.id) })) : action.steps;
+    // patch=true updates existing IDs in place; submitted new IDs append in order
+    // instead of failing — logs show the old rejection made models abandon the plan.
+    const appended = action.patch ? action.steps.filter(step => !previous.has(step.id)).map(step => step.id) : [];
+    const entries = action.patch ? [...job.plan.steps.map(step => ({ ...step, ...incoming.get(step.id) })),
+        ...appended.map(id => incoming.get(id))] : action.steps;
     const known = new Map();
     const steps = entries.map((input, index) => {
         const entry = { ...previous.get(input.id), ...input };
         const id = requiredText(entry?.id, '步骤 ID', 40);
-        for (const field of ['title', 'success']) if (!entry[field]?.trim()) throw protocolError(`steps[${index}].${field}`,
+        for (const field of ['title', 'success']) if (!entry[field]?.trim()) throw planError(`steps[${index}].${field}`,
             '新步骤必须包含 ' + field + '；success 是可观察的完成标准，evidence 不能替代它',
-            { id, title: '拆除并验收目标区域', success: '登记目标全部为空气', status: 'running' }, 'INVALID_PLAN');
-        if (known.has(id)) throw new Error('步骤 ID 重复');
+            { id, title: '拆除并验收目标区域', success: '登记目标全部为空气', status: 'running' });
+        if (known.has(id)) throw planError('steps', '步骤 ID 重复');
         const depends_on = entry.depends_on ?? [];
-        if (!Array.isArray(depends_on) || depends_on.some(dep => !known.has(dep))) throw new Error('步骤依赖必须指向之前的步骤');
+        if (!Array.isArray(depends_on) || depends_on.some(dep => !known.has(dep))) throw planError(`steps[${index}].depends_on`, '步骤依赖必须指向之前的步骤');
         const status = entry.status ?? 'pending';
-        if (!['pending', 'running', 'done', 'blocked'].includes(status)) throw new Error('步骤状态无效');
+        if (!['pending', 'running', 'done', 'blocked'].includes(status)) throw planError(`steps[${index}].status`, '步骤状态无效');
         const evidence = status === 'done' ? requiredText(entry.evidence, '完成依据') : '';
-        if (status === 'done' && depends_on.some(dep => known.get(dep).status !== 'done')) throw new Error('依赖未完成，不能把步骤标为完成');
+        if (status === 'done' && depends_on.some(dep => known.get(dep).status !== 'done')) throw planError(`steps[${index}].status`, '依赖未完成，不能把步骤标为完成');
         const step = { id, title: requiredText(entry.title, '步骤标题', 200),
             success: requiredText(entry.success, '步骤完成标准', 500), depends_on, status, evidence };
         known.set(id, step);
         return step;
     });
     job.plan = { requirements: [...requirements.values()], steps };
-    return { status: 'planned', plan: job.plan, ...(preservedRequirements.length ? {
+    return { status: 'planned', plan: job.plan, ...(appended.length ? {
+        appendedSteps: appended, note: 'patch 已按提交顺序追加新步骤 ' + appended.join(', ') + ' 并保留原步骤。'
+    } : {}), ...(preservedRequirements.length ? {
         preservedRequirements, note: '已有需求由系统维护，已保留原文；步骤更新已接受。进展请写入 steps 的 status/evidence，后续省略 requirements。'
     } : {}) };
 }
@@ -122,6 +142,10 @@ function validateState(state) {
     if (state.demolition && state.assignment) throw new Error('纯拆除目标不能与新建蓝图同时验收');
     state.inputRevision ??= 0;
     state.messages ??= [{ role: 'user', from: state.owner, content: state.request }];
+    // teamFeed 是团队生命周期通知的短动态流；旧状态没有该字段视为空。
+    state.teamFeed ??= [];
+    if (!Array.isArray(state.teamFeed) || state.teamFeed.length > 12 || state.teamFeed.some(item => !item ||
+        typeof item.text !== 'string' || typeof item.kind !== 'string' || typeof item.from !== 'string')) throw new Error('保存的团队动态无效');
     state.clarifications ??= (state.events ?? []).filter(event => event.kind === 'user' && event.name === 'message')
         .map(event => ({ from: event.input.from, content: event.input.text }));
     if (!Array.isArray(state.clarifications) || state.clarifications.some(item => !item ||
@@ -258,15 +282,13 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
             job.supportedMaterials = world.supportedMaterials?.() ?? MATERIALS;
             tools = createBuildingTools({ world, job, design: createBlueprintSkill(countedModel), checkpoint, sendMessage, peers, team,
                 onProgress: info => report('progress', info) });
-            job.status = 'observing';
-            // Refresh live facts at every start/resume; saved observations are never authoritative.
-            try {
-                const observation = await tools.call('observe_environment', {}, signal);
-                record('tool', 'observe_environment', {}, observation);
-            } catch (error) {
-                signal.throwIfAborted();
-                record('feedback', 'observe_environment', {}, { status: 'error', message: error.message });
-            }
+            job.status = 'thinking';
+            // The model chooses whether and where to observe from the task and
+            // current snapshot. Never silently scan a fixed region on start/resume.
+            // Retain evidence across waits/resumes; the model decides whether
+            // its age, coverage and possible changes warrant another read.
+            markObservationsStale(job, 'round_resumed');
+            job.lastInspection = null;
             await checkpoint();
             const trackProgress = createProgressTracker(job, world);
             while (!result) {
@@ -350,8 +372,17 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                     }
                     if (action.action === 'wait_for_team') {
                         if (!team?.runtime) throw new Error('没有团队运行时');
-                        if (!job.teamTask && !coordinatorHasWork()) throw new Error('没有正在执行或可领取的子任务。检查 team.agents 的 canAcceptTask 和任务 claimStalled；用 reassign_task(taskId, recipient) 重派阻塞或未领取的任务，用户主动暂停的成员需要用户恢复');
-                        if ((job.teamEventRevision ?? 0) !== teamRevision) output = { status: 'received', message: '有新的团队事件，请读取后继续决策' };
+                        if (!job.teamTask && !coordinatorHasWork()) {
+                            // "没有可执行任务"可能是运行时接管尚未完成（进程退出
+                            // 检测、重派与 sweep 都是秒级粒度）。转等待事件而非立刻
+                            // 报错：重派/结束事件会推进 revision 并唤醒。
+                            if (job.teamContext?.tasks?.some(task => !['completed', 'cancelled', 'failed'].includes(task.status))) {
+                                session.waitRevision = teamRevision;
+                                result = { status: 'waiting_team', reason: '暂无正在执行或可领取的子任务，等待运行时接管/结算事件', automatic: true };
+                                output = { ...result, note: 'runtime takeover may still be in progress; task events will wake this run' };
+                            } else throw new Error('没有正在执行或可领取的子任务。检查 team.agents 的 canAcceptTask 和任务 claimStalled；用 reassign_task(taskId, recipient) 重派阻塞或未领取的任务，用户主动暂停的成员需要用户恢复');
+                        }
+                        else if ((job.teamEventRevision ?? 0) !== teamRevision) output = { status: 'received', message: '有新的团队事件，请读取后继续决策' };
                         else {
                             session.waitRevision = teamRevision;
                             result = { status: 'waiting_team', reason: requiredText(action.reason, '等待原因') };
@@ -415,14 +446,14 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                         ...(error.position ? { position: error.position } : {}),
                         ...(['INVALID_DECISION', 'INVALID_ARGUMENT', 'INVALID_PLAN', 'API_INVALID_RESPONSE', 'TEAM_ROLE_DENIED'].includes(error.code) ? {
                             recovery: (model.decisionProtocol === 'native_functions' || model.provider === 'DeepSeek') ?
-                                'Correct the named field using expected, then call the provided native function directly. No submit_action/tool/batch wrapper or action field. Tool calls and update_plan may share a response; design/wait/finish must be called alone. New plan steps require id,title,success; patch=true updates existing steps.' :
-                                'Correct the named field using expected. The response must be ONE JSON object with a top-level "action" field — using the action name as the only top-level key (e.g. {"update_plan":{...}}) is invalid; write {"action":"update_plan",...} instead. Tool example: {"action":"tool","name":"inspect_build","args":{}}. New plan step requires id,title,success; patch=true updates existing steps.'
+                                'Correct the named field using expected, then call the provided native function directly. No submit_action/tool/batch wrapper or action field. Tool calls and update_plan may share a response; design/wait/finish must be called alone. New plan steps require id,title,success; patch=true updates existing steps and appends new IDs in order.' :
+                                'Correct the named field using expected. The response must be ONE JSON object with a top-level "action" field — using the action name as the only top-level key (e.g. {"update_plan":{...}}) is invalid; write {"action":"update_plan",...} instead. Tool example: {"action":"tool","name":"inspect_build","args":{}}. New plan step requires id,title,success; patch=true updates existing steps and appends new IDs in order.'
                         } : {}) };
                 }
                 record('feedback', action?.name ?? action?.action ?? 'decision_error', action ?? {}, output);
                 await checkpoint();
                 if (job.inputRevision !== decisionRevision) result = null;
-                invalidDecisions = ['INVALID_DECISION', 'INVALID_ARGUMENT', 'API_INVALID_RESPONSE'].includes(output?.code) ? invalidDecisions + 1 : 0;
+                invalidDecisions = ['INVALID_DECISION', 'INVALID_ARGUMENT', 'INVALID_PLAN', 'API_INVALID_RESPONSE'].includes(output?.code) ? invalidDecisions + 1 : 0;
                 if (!result && invalidDecisions >= 3) result = { status: 'paused',
                     reason: '模型连续三次返回不符合当前函数或动作协议的调用，已保存进度及 response 原始响应日志。可发送“继续”重试' };
                 const progress = trackProgress(action, output);
@@ -510,6 +541,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                 originLocked, siteIssue, messages, clarifications: [], inputRevision: 0, model: model.modelName ?? 'configured_model', status: 'planning',
                 plan: { requirements: [{ id: 'goal', description: request.trim() }], steps: [] },
                 assignment: null, assignmentVersion: 0, design: null, demolition: null, placed: {}, removed: {}, events: [],
+                observation: null, blockObservations: [],
                 modelRequests: 0, decisions: 0, placementAttempts: 0, demolitionAttempts: 0, removalCount: 0, elapsedMs: 0,
                 tokenUsage: emptyTokenUsage() };
             if (teamAssignment) {
@@ -547,8 +579,15 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
             if (job.teamEvents.includes(event.id)) return true;
             job.teamEvents.push(event.id); job.teamEvents = job.teamEvents.slice(-200);
             job.teamEventRevision = (job.teamEventRevision ?? 0) + 1;
-            job.messages.push({ role: 'user', from: event.from, content: ('[团队事件 ' + event.kind + '] ' + JSON.stringify(event.payload)).slice(0, 1000), at: new Date().toISOString() });
-            job.messages = job.messages.slice(-40);
+            // 生命周期事件进短动态流而非聊天窗口：完整任务状态每轮由 teamContext
+            // 刷新并进入上下文，聊天窗口只保留真实对话，避免两处重复膨胀。
+            if (['message', 'share_proposal'].includes(event.kind)) {
+                job.messages.push({ role: 'user', from: event.from, content: ('[团队事件 ' + event.kind + '] ' + JSON.stringify(event.payload)).slice(0, 300), at: new Date().toISOString() });
+                job.messages = job.messages.slice(-40);
+            } else {
+                job.teamFeed = [...(job.teamFeed ?? []), { at: new Date().toISOString(), kind: event.kind, from: event.from,
+                    text: ('[团队 ' + event.kind + '] ' + (event.payload?.reason ?? event.payload?.summary ?? event.payload?.action ?? '')).toString().slice(0, 160) }].slice(-12);
+            }
             await checkpoint();
             if (event.kind === 'control') {
                 if (event.payload.action === 'cancel' && (job.teamTask || job.teamCoordination)) { await controller.stop('cancelled'); return true; }
@@ -595,7 +634,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                 job.origin = coordinates(input.origin, '确认的施工原点');
                 job.originLocked = input.originLocked ?? false;
                 job.siteIssue = null;
-                job.observation = null;
+                markObservationsStale(job, 'worksite_changed');
                 world.setWorksite?.({ origin: job.origin, dimension: job.dimension });
             }
             if (input.origin && input.originLocked && input.origin.some((n, i) => n !== job.origin[i])) {
@@ -624,6 +663,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
         restore(state) {
             if (active) throw new Error('当前任务仍在运行');
             job = validateState(structuredClone(state));
+            markObservationsStale(job, 'process_restored');
             if (job.status !== 'waiting_user') job.status = 'paused';
             return job.id;
         },

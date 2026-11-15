@@ -11,6 +11,7 @@ const wait = { action: 'wait_for_user', reason: '请确认材料' };
 const stop = { action: 'blocked', reason: '测试到此结束' };
 const plan = done => ({ action: 'update_plan', steps: [{ id: 's1', title: '建造并验收',
     success: '一个石头方块', status: done ? 'done' : 'running', evidence: done ? '现场读取为 stone' : '' }] });
+const observe = { action: 'tool', name: 'observe_environment', args: { region: { min: [0, -1, 0], max: [1, 2, 1] } } };
 const design = { action: 'skill', name: 'design_blueprint', args: {} };
 const geometry = { shapes: [{ kind: 'point', at: [0, 0, 0], block: 'stone' }],
     summary: '一个石头方块', coverage: [{ requirementId: 'goal', evidence: '指定位置一个 stone' }] };
@@ -83,7 +84,7 @@ function fixture(script, options = {}) {
         assert.equal(context.ORIGINAL_GOAL, '放一个方块');
         assert.equal(context.messages.at(-1).content, '石头');
         return plan(false);
-    }, design, geometry, place, plan(true), finish]);
+    }, observe, design, geometry, place, plan(true), finish]);
     const waiting = await h.agent.receiveMessage({ ...task, request: '放一个方块' });
     assert.equal(waiting.status, 'waiting_user');
     assert.equal(h.calls.length, 2);
@@ -114,8 +115,8 @@ function fixture(script, options = {}) {
 // An unavailable site prevents building while allowing a question. A subsequent
 // input with a valid site clears that limitation and construction can proceed.
 {
-    const h = fixture([plan(false), design, say('请靠近一点，让我确认施工位置。'), wait,
-        { action: 'tool', name: 'observe_environment', args: {} }, design, geometry, place, plan(true), finish]);
+    const h = fixture([plan(false), observe, design, say('请靠近一点，让我确认施工位置。'), wait,
+        observe, design, geometry, place, plan(true), finish]);
     const waiting = await h.agent.receiveMessage({ ...task, request: '放一个石头方块', siteIssue: '玩家不可见' });
     assert.equal(waiting.status, 'waiting_user');
     assert.equal(h.agent.snapshot().assignment, null);
@@ -129,7 +130,7 @@ function fixture(script, options = {}) {
 // Input received during an outstanding decision invalidates the stale placement.
 {
     let h;
-    h = fixture([plan(false), design, geometry, async () => {
+    h = fixture([plan(false), observe, design, geometry, async () => {
         const received = await h.agent.receiveMessage({ ...task, request: '先别放，确认一下材料' });
         assert.equal(received.status, 'received');
         return place;
@@ -147,7 +148,7 @@ function fixture(script, options = {}) {
 // A design response generated before a follow-up must not become the current blueprint.
 {
     let h;
-    h = fixture([plan(false), design, async () => {
+    h = fixture([plan(false), observe, design, async () => {
         await h.agent.receiveMessage({ ...task, request: '先不要设计' });
         return geometry;
     }, say('已停止这次设计，等你确认。'), wait]);
@@ -157,7 +158,7 @@ function fixture(script, options = {}) {
 
 // Neither end_turn nor an unanswered wait can bypass construction verification.
 {
-    const h = fixture([wait, plan(false), design, geometry, say('正在建造'), end, stop]);
+    const h = fixture([wait, plan(false), observe, design, geometry, say('正在建造'), end, stop]);
     assert.equal((await h.agent.receiveMessage(task)).status, 'blocked');
     const errors = h.agent.snapshot().events.filter(event => event.output?.status === 'error');
     assert(errors.some(event => /先用 send_message/.test(event.output.message)));

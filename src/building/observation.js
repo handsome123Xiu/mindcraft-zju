@@ -47,5 +47,5 @@ export function scanCells(positions, world) {
         if (actual !== 'air') cells.push({ pos, block: actual });
     }
     return { requested: seen.size, counts, cells, unloaded,
-        airCount: seen.size - cells.length - unloaded.length };
+        unloadedTruncated: (counts.unloaded ?? 0) > unloaded.length, airCount: counts.air ?? 0 };
 }

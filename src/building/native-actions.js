@@ -1,8 +1,9 @@
 import { ACTION_SCHEMAS, TOOL_SCHEMAS, parseAction, protocolError, validateSchema } from './action-protocol.js';
 
 const descriptions = {
-    update_plan: 'Create/replace the complete step list with patch=false. patch=true changes existing IDs only; cannot add steps. New steps need id,title,success. Omit immutable requirements on progress updates.',
-    design_blueprint: 'Design or revise the shared blueprint after observation and planning.',
+    observe_environment: 'Observe an explicit world-coordinate region chosen from the task footprint, height and current facts. region.min/max are required; no default scan. Expand or page when needed; unloaded/omitted cells are not air.',
+    update_plan: 'Create/replace the complete step list with patch=false. patch=true updates existing IDs (title/success merge from the stored step) and appends submitted new IDs in order. New steps need id,title,success. Omit immutable requirements on progress updates.',
+    design_blueprint: 'Design or revise after planning. Reuse sufficient observations/block inspections; choose extra reads only for missing or uncertain facts. Publication independently checks the actual site.',
     delegate_task: 'Queue a scoped construction task for a worker. Dispatch independent tasks before waiting. dependsOn uses returned task IDs.',
     inspect_part: 'Inspect your scoped part and get exact executable suggestions for missing cells.',
     get_tool_help: 'Retrieve exact usage for a tool and make it available in the next decision.',

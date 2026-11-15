@@ -56,7 +56,7 @@ const scriptedAdapter = {
                 { kind: 'point', part: scoped || cooperative ? 'structure' : 'east', at: [2, 0, 0], block: 'stone' },
                 { kind: 'point', part: scoped || cooperative ? 'structure' : 'upper', at: [0, 1, 0], block: 'stone' }
             ] });
-        const context = JSON.parse(turns[0].content);
+        const context = JSON.parse(turns[0].content); if (process.env.TEST_DUMP_LEAD === name) console.error("LEADCTX tasks=" + JSON.stringify(context.team.tasks) + " feed=" + JSON.stringify(context.team.feed));
         if (!instructions.includes('Call the provided native functions directly') || instructions.includes('ACTIONS (fields')) {
             throw new Error('Production startup lost the native decision protocol');
         }
@@ -81,6 +81,8 @@ function decide(context) {
     }
     if (!context.plan.steps.length) return plan(false);
     if (name === 'lead') {
+        if (!context.blueprint && !context.observation) return { action: 'tool', name: 'observe_environment',
+            args: { region: { min: [0,-1,0], max: [3,3,2] } } };
         if (!context.blueprint) return { action: 'skill', name: 'design_blueprint', args: {} };
         const tasks = context.team.tasks ?? [];
         if (spatial && !tasks.length) return { action: 'tool', name: 'prepare_parallel_build', args: {} };

@@ -151,7 +151,8 @@ const base = [
     const f = fixture([{ kind: 'box', part: '平台', min: [0, 0, 0], max: [1, 0, 0], block: 'stone' }]);
     const done = { action: 'update_plan', steps: [{ id: 's1', title: '施工', success: '现场两格正确', status: 'done', evidence: '部件通过' }] };
     const finish = { action: 'finish', summary: '完成', requirementReview: [{ requirementId: 'goal', satisfied: true, evidence: '现场通过' }] };
-    const script = [done, { action: 'skill', name: 'design_blueprint', args: {} },
+    const script = [tool('observe_environment', { region: { min: origin.map((n, i) => n - (i === 1 ? 1 : 0)),
+        max: origin.map(n => n + 2) } }), done, { action: 'skill', name: 'design_blueprint', args: {} },
         { summary: '平台', coverage: [{ requirementId: 'goal', evidence: '两格平台' }], shapes: f.job.design.shapes },
         tool('place_row', { start: [0, 0, 0], end: [1, 0, 0], block: 'stone', coordinateSpace: 'blueprint' }),
         tool('inspect_part', { partId: 'part-1' }),

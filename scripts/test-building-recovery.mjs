@@ -201,7 +201,8 @@ const removeRow = tool('dig_row', { start: [0, 0, 0], end: [2, 0, 0], expectedBl
     assert(feedback.expected.includes('tool'));
     const badPlans = [1, 2, 3].map(n => ({ action: 'update_plan', steps: [{ id: 's1', title: '改名' + n, evidence: '全部为空气' }] }));
     const p = fixture({ script: badPlans });
-    assert.equal((await p.agent.start(task)).status, 'blocked');
+    assert.equal((await p.agent.start(task)).status, 'paused');
+    assert.match(p.agent.snapshot().result.reason, /连续三次/);
     assert.equal(p.calls.length, 3);
     assert.equal(p.agent.snapshot().events.at(-1).output.field, 'steps[0].success');
     const repeats = fixture({ script: [plan, ...Array.from({ length: 8 }, (_, n) => ({ action: 'update_plan', patch: true,
@@ -252,7 +253,8 @@ const removeRow = tool('dig_row', { start: [0, 0, 0], end: [2, 0, 0], expectedBl
         { kind: 'point', at: [0, 5, 0], block: 'yellow_terracotta' }
     ];
     const rect = (min, max, block) => tool('place_rectangle', { min, max, block, coordinateSpace: 'blueprint' });
-    const script = [plan, { action: 'skill', name: 'design_blueprint', args: {} },
+    const script = [tool('observe_environment', { region: { min: [0, -61, -1], max: [6, -55, 5] } }),
+        plan, { action: 'skill', name: 'design_blueprint', args: {} },
         { summary: '分层蛋糕', shapes, coverage: [{ requirementId: 'goal', evidence: '分层主体、红边和蜡烛' }] },
         rect([-3, 0, -3], [3, 0, 3], 'quartz_block'),
         ...[ [[-3, 1, -3], [3, 1, -3]], [[-3, 1, 3], [3, 1, 3]],

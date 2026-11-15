@@ -73,7 +73,8 @@ try {
     assert.equal(model.decisionProtocol, 'native_functions'); assert.equal(created, 0);
     const plan = done => ({ steps: [{ id: 'build', title: 'Build', success: 'both cells verified',
         status: done ? 'done' : 'running', evidence: done ? 'observed both stone cells' : '' }] });
-    const calls = [ ['batch', {}], ['update_plan', plan(false)], ['design_blueprint', {}],
+    const calls = [ ['batch', {}], ['update_plan', plan(false)],
+        ['observe_environment', { region: { min: [0,-1,0], max: [1,1,0] } }], ['design_blueprint', {}],
         ['inspect_part', { partId: 'part-1' }],
         ['place_row', { start: [0,0,0], end: [1,0,0], block: 'stone', partId: 'part-1', assignmentVersion: 1 }],
         ['update_plan', plan(true)], ['finish', { summary: 'verified', requirementReview: [{ requirementId: 'goal', satisfied: true, evidence: 'two stone cells verified' }] }] ];

@@ -186,7 +186,7 @@ function toolFixture() {
 }
 
 // An unreachable dig result carries a hint to clear covering blocks first,
-// and observe_cells samples satisfy the design-time observation gate.
+// and observe_cells samples remain available as design evidence.
 {
     const f = toolFixture();
     f.blocks.set('0,0,0', 'glass');
@@ -198,7 +198,7 @@ function toolFixture() {
     f.job.observation = null;
     const sampled = await f.tools.call('observe_cells', { positions: [[0, 0, 0], [1, 0, 0]] });
     assert.equal(sampled.kind, 'cells');
-    assert(f.job.observation?.requested >= 1, 'observe_cells must satisfy the design observation gate');
+    assert(f.job.observation?.requested >= 1, 'observe_cells must preserve design evidence');
     assert.equal(f.job.observation.cells.length, 1);
 }
 

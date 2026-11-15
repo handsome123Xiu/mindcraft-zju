@@ -200,7 +200,10 @@ function fixture(options = {}) {
     assert.equal(world.read([0, 10, 0]), 'stone');
     assert.equal(world.snapshot().flying, true);
     assert(f.bot.entity.position.y >= 8);
-    assert.equal(job.observation, null);
+    assert.equal(job.observation.old, true);
+    assert.equal(job.observation.freshness, 'possibly_stale');
+    assert(job.observation.staleReasons.includes('movement'));
+    assert(job.observation.staleReasons.includes('placement_attempt'));
     assert.equal((await tools.call('fly_to', { position: [-3, 12, 0] })).status, 'flown');
     assert.equal((await tools.call('land_at', { position: [-3, 0, 0] })).status, 'landed');
     assert.equal(world.snapshot().flying, false);

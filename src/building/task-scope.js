@@ -47,10 +47,14 @@ export function taskScope(task, full = false) {
 }
 
 export function scopeSummary(scope) {
+    // scope 可能是 region 形式或缺省（whole-module）；positions 缺失时不能崩溃。
     if (!scope) return { kind: 'whole-module' };
-    const positions = scope.positions;
-    if (!positions.length) return { kind: 'cells', count: 0 };
-    const min = [...positions[0]], max = [...positions[0]];
-    for (const pos of positions) for (let i = 0; i < 3; i++) { min[i] = Math.min(min[i], pos[i]); max[i] = Math.max(max[i], pos[i]); }
-    return { kind: 'cells', count: positions.length, bounds: { min, max } };
+    if (Array.isArray(scope.positions)) {
+        if (!scope.positions.length) return { kind: 'cells', count: 0 };
+        const min = [...scope.positions[0]], max = [...scope.positions[0]];
+        for (const pos of scope.positions) for (let i = 0; i < 3; i++) { min[i] = Math.min(min[i], pos[i]); max[i] = Math.max(max[i], pos[i]); }
+        return { kind: 'cells', count: scope.positions.length, bounds: { min, max } };
+    }
+    if (scope.region) return { kind: 'region', bounds: scope.region };
+    return { kind: 'whole-module' };
 }

@@ -124,4 +124,32 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
     assert.equal((await solo.call('query_claims')).claims !== undefined, true);
 }
 
+// 团队生命周期事件进短 teamFeed 而不是聊天窗口；真人消息仍进 messages 且更紧凑。
+{
+    const { createBuildingLoop } = await import('../src/building/loop-agent.js');
+    const files = new Map();
+    const controller = createBuildingLoop({ world: {
+        read: () => 'air', snapshot: () => ({ dimension: 'overworld', position: [0, 0, 4], gameMode: 'creative' }), async prepare() {}
+    }, model: { async sendRequest() { return JSON.stringify({ action: 'blocked', reason: 'fixture' }); } },
+        async save(id, type, data) { files.set(type, structuredClone(data)); } });
+    controller.restore({ version: 1, kind: 'building-loop', id: 'feed-run', teamRunId: 'feed-run', request: 'build', owner: 'tester',
+        origin: [0,0,0], dimension: 'overworld', status: 'waiting_team', inputRevision: 0,
+        messages: [{ role: 'user', from: 'tester', content: 'build' }], clarifications: [],
+        teamEvents: [], teamFeed: [], plan: { requirements: [{ id: 'goal', description: 'build' }], steps: [] },
+        placed: {}, removed: {}, events: [], modelRequests: 0, decisions: 0, elapsedMs: 0,
+        placementAttempts: 0, assignmentVersion: 0, demolitionAttempts: 0, removalCount: 0 });
+    const receive = controller.receiveTeamEvent;
+    for (let i = 0; i < 15; i++) await receive({ id: 'e' + i, runId: 'feed-run', kind: 'task_status', from: 'runtime', payload: { reason: '生命周期事件 ' + i + ' ' + '长'.repeat(200) } });
+    const snapshot = controller.snapshot();
+    assert.equal(snapshot.messages.length, 1, '生命周期事件不进聊天窗口');
+    assert.equal(snapshot.teamFeed.length, 12, 'feed 保留最近 12 条');
+    assert(snapshot.teamFeed.at(-1).text.length <= 160);
+    assert(snapshot.teamFeed.at(-1).text.includes('task_status'), 'feed 文本保留事件 kind 标识');
+    await receive({ id: 'msg1', runId: 'feed-run', kind: 'message', from: 'beta', payload: { text: '你好，这里能施工吗？'.repeat(40) } });
+    const after = controller.snapshot();
+    assert.equal(after.messages.length, 2, '队友消息仍进聊天窗口');
+    assert(after.messages.at(-1).content.length <= 300, '队友消息截断到 300 字符');
+    assert.equal(after.teamFeed.length, 12, '真人消息不进 feed');
+}
+
 console.log('Team coordination checks passed: lease tools in catalog, spec validation and presets, role permissions, lease exclusivity/TTL, tool-layer gating with and without a team.');
