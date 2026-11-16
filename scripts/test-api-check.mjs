@@ -16,7 +16,7 @@ const model = Object.assign(Object.create(CourseResponses.prototype), {
 const response = data => ({ ok: true, status: 200, json: async () => data });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const messages = [];
-const run = options => checkApiConnection({ model, report: text => messages.push(text), ...options });
+const run = options => checkApiConnection({ model, report: text => messages.push(text), retryDelayMs: 1, ...options });
 
 try {
     process.chdir(directory);
@@ -61,6 +61,44 @@ try {
         assert(messages.some(text => /检测失败/.test(text)));
         assert(!messages.some(text => /检测通过/.test(text)));
     }
+
+    // A temporary gateway outage recovers without restarting the bot.
+    for (const status of [502, 503, 504]) {
+        let attempts = 0;
+        globalThis.fetch = async () => ++attempts < 3 ? { ok: false, status } :
+            response({ status: 'completed', output_text: '{"status":"ok"}', usage });
+        const recovered = await run();
+        assert.equal(recovered.ok, true);
+        assert.equal(attempts, 3);
+        assert.equal(recovered.tokenUsage.reportedRequests, 1);
+        assert.equal(recovered.tokenUsage.unreportedRequests, 2);
+        assert.equal(recovered.tokenUsage.totalTokens, 25);
+    }
+    let attempts = 0;
+    globalThis.fetch = async () => { attempts++; return { ok: false, status: 503 }; };
+    const unavailable = await run();
+    assert.equal(attempts, 3, 'persistent outage must stop after three requests');
+    assert.equal(unavailable.tokenUsage.unreportedRequests, 3);
+    assert.match(unavailable.reason, /网关或上游服务暂时不可用/);
+    for (const status of [400, 401, 403, 429]) {
+        attempts = 0;
+        globalThis.fetch = async () => { attempts++; return { ok: false, status }; };
+        assert.equal((await run()).ok, false);
+        assert.equal(attempts, 1, 'do not repeat rejected configuration/auth/quota requests');
+    }
+    // Cancellation and the overall timeout also cover the backoff interval.
+    const abortRetry = new AbortController();
+    attempts = 0;
+    globalThis.fetch = async () => { attempts++; return { ok: false, status: 503 }; };
+    const cancelledRetry = await run({ signal: abortRetry.signal, retryDelayMs: 1000,
+        report: text => { if (text.includes('后重试')) abortRetry.abort(); } });
+    assert.equal(cancelledRetry.status, 'cancelled');
+    assert.equal(attempts, 1);
+    attempts = 0;
+    const retryTimeout = await run({ timeoutMs: 25, retryDelayMs: 1000 });
+    assert.match(retryTimeout.reason, /请求超时/);
+    assert.equal(attempts, 1);
+    assert.equal(retryTimeout.tokenUsage.unreportedRequests, 1);
 
     // HTTP 200 alone cannot pass: require a completed, usable reply.
     for (const data of [

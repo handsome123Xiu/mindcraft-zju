@@ -60,23 +60,30 @@ function harness(script, options = {}) {
     return { agent, world, blocks, files, reports, calls, model };
 }
 
-// Actual model/tool/skill loop: invalid geometry returns feedback, the model observes
-// and redesigns, the model chooses separate primitives, and an early finish is rejected.
+// The blueprint skill repairs the rejected draft before returning to the main loop.
+// The agent still chooses separate primitives, and an early finish is rejected.
 {
     const h = harness([
-        observe, plan(), skill, geometry([]),
-        { action: 'tool', name: 'observe_environment', args: { region: { min: [0, -1, 0], max: [1, 1, 1] } } },
-        skill, geometry(), row(1), finish, row(), inspect, plan(true), finish
+        observe, plan(), skill, geometry([{ kind: 'box', min: [0, -1, 0], max: [1, -1, 0], block: 'stone' }]),
+        ({ turns, isSkill }) => {
+            assert.equal(isSkill, true);
+            const { blueprintRepair } = JSON.parse(turns[1].content);
+            assert.equal(blueprintRepair.field, 'shapes[0].min');
+            assert.match(blueprintRepair.message, /基准面下方/);
+            assert.equal(JSON.parse(blueprintRepair.rejectedDraft).shapes[0].min[1], -1);
+            return JSON.stringify(geometry());
+        },
+        row(1), finish, row(), inspect, plan(true), finish
     ]);
     const result = await h.agent.start(task);
     assert.equal(result.status, 'completed');
     assert.equal(result.verified, 2);
-    assert.equal(result.modelRequests, 13);
-    assert.equal(result.decisions, 11);
+    assert.equal(result.modelRequests, 11);
+    assert.equal(result.decisions, 9);
     assert.equal(result.semanticVerification, 'model_reported');
     assert.equal(result.structuralVerification, 'machine_verified');
     const feedback = h.agent.snapshot().events.filter(event => event.kind === 'feedback');
-    assert.equal(feedback.filter(event => event.output.status === 'error').length, 2);
+    assert.equal(feedback.filter(event => event.output.status === 'error').length, 1);
     assert(feedback.some(event => event.name === 'place_row' && event.output.status === 'completed' && event.output.total === 1));
     assert(h.calls.filter(call => call.isSkill).every(call => JSON.parse(call.turns[0].content).originalGoal));
     assert(h.calls.at(-1).context.runId === result.runId);
@@ -409,7 +416,7 @@ function harness(script, options = {}) {
 
 // Invalid geometry still consumes tokens. Missing usage is explicitly unknown.
 {
-    const h = harness([observe, plan(), skill, geometry([]), skill, geometry(), row(), plan(true), finish], {
+    const h = harness([observe, plan(), skill, geometry([]), geometry(), row(), inspect, plan(true), finish], {
         usage: ({ call }) => call === 5 ? null : { input_tokens: 100, output_tokens: 10, total_tokens: 110 }
     });
     const result = await h.agent.start(task);

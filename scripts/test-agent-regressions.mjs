@@ -109,6 +109,28 @@ try {
     let retries = 0;
     await assert.rejects(createBlueprintSkill({ async sendRequest() { retries++; throw Object.assign(new Error('truncated'), { code: 'API_INCOMPLETE', incompleteReason: 'max_output_tokens' }); } })({ request: 'x', origin: [0,0,0] }), /truncated/);
     assert.equal(retries, 2, 'design retries are bounded');
+
+    adapter.url = 'https://api.deepseek.com/responses';
+    adapter.params.reasoning = { effort: 'none' };
+    const conflict = { shapes: [{ kind: 'point', at: [0,0,0], block: 'stone' },
+        { kind: 'point', at: [0,0,0], block: 'glass' }] };
+    const rejectedDraft = JSON.stringify(conflict);
+    let attempts = 0;
+    globalThis.fetch = async (url, options) => {
+        const body = JSON.parse(options.body);
+        assert.deepEqual(body.text.format, { type: 'json_object' });
+        assert.equal(body.reasoning.effort, attempts === 0 ? 'none' : 'low');
+        if (attempts++ > 0) {
+            const { blueprintRepair } = JSON.parse(body.input[1].content);
+            assert.equal(blueprintRepair.field, 'shapes[1].block');
+            assert.equal(blueprintRepair.rejectedDraft, rejectedDraft);
+        }
+        return { ok: true, status: 200, json: async () => ({ status: 'completed', output_text: rejectedDraft }) };
+    };
+    await assert.rejects(createBlueprintSkill(model)({ request: 'x', origin: [0,0,0] }),
+        error => error.code === 'INVALID_BLUEPRINT_GEOMETRY' && error.field === 'shapes[1].block');
+    assert.equal(attempts, 3, 'repeated geometry rejection stops after two repairs');
+    assert.deepEqual(adapter.params.reasoning, { effort: 'none' }, 'repair must not change the profile');
 } finally { globalThis.fetch = previousFetch; process.chdir(previousCwd); await rm(directory, { recursive: true, force: true }); }
 
 // A child that exhausts its model/progress budget must not keep renewing a

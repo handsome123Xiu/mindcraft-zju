@@ -45,16 +45,21 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
     const parts = new Map();
     let currentPart;
     let expanded = 0;
-    function write(pos, material, replaceFrom) {
-        if (++expanded > MAX_VOLUME * 2 || pos.some(n => Math.abs(n) >= MAX_SPAN) || pos[1] < 0) {
-            throw new Error('蓝图超出几何预算或位于施工基准面下方');
-        }
+    function shapeError(index, field, message) {
+        return Object.assign(new Error(message), { field: 'shapes[' + index + '].' + field });
+    }
+    function validateOffset(pos, index, field) {
+        if (pos[1] < 0) throw shapeError(index, field, '蓝图相对坐标 [' + pos + '] 位于施工基准面下方；y=0 对应世界 Y=' + base[1] + '，施工必须在基准面及其上方');
+        if (pos.some(n => Math.abs(n) >= MAX_SPAN)) throw shapeError(index, field, '蓝图相对坐标 [' + pos + '] 超出 -255..255');
+    }
+    function write(pos, material, index, replaceFrom) {
+        if (++expanded > MAX_VOLUME * 2) throw new Error('蓝图超出几何预算');
         const key = pos.join(',');
         domain.set(key, pos);
         const old = local.get(key);
-        if (replaceFrom && old?.block !== replaceFrom) throw new Error('蓝图 replace 的 from 不匹配：' + key +
+        if (replaceFrom && old?.block !== replaceFrom) throw shapeError(index, 'from', '蓝图 replace 的 from 不匹配：' + key +
             '，预期 ' + replaceFrom + '，实际 ' + (old?.block ?? 'air'));
-        if (old && old.block !== material && !replaceFrom) throw new Error('蓝图材料冲突：' + key +
+        if (old && old.block !== material && !replaceFrom) throw shapeError(index, 'block', '蓝图材料冲突：' + key +
             ' 同时为 ' + old.block + ' 和 ' + material + '。请划分不重叠区域，或用 kind=replace、from=' + old.block + ' 显式替换设计材料');
         local.set(key, { pos, block: material, part: currentPart });
     }
@@ -65,10 +70,13 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
             replace: ['kind', 'min', 'max', 'from', 'block'], opening: ['kind', 'min', 'max'] };
         if (Object.hasOwn(fields, kind)) {
             const unsupported = Object.keys(shape).filter(key => key !== 'part' && !fields[kind].includes(key));
-            if (unsupported.length) throw new Error('蓝图形状未知字段 ' + unsupported.join(',') + '；当前不支持方块朝向、状态、隐式 hollow 或其他扩展字段');
+            if (unsupported.length) throw shapeError(index, unsupported[0], '蓝图形状未知字段 ' + unsupported.join(',') + '；当前不支持方块朝向、状态、隐式 hollow 或其他扩展字段');
         }
         if (kind === 'opening') {
-            openings.push(bounds(shape, 'opening'));
+            const region = bounds(shape, kind);
+            validateOffset(region.min, index, 'min');
+            validateOffset(region.max, index, 'max');
+            openings.push(region);
             continue;
         }
         assertMaterial(shape?.block, availableMaterials);
@@ -77,9 +85,13 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
         if (!parts.has(title)) parts.set(title, { id: 'part-' + (parts.size + 1), title });
         currentPart = parts.get(title).id;
         if (kind === 'point') {
-            write(coordinates(shape.at, 'point.at'), shape.block);
+            const pos = coordinates(shape.at, 'point.at');
+            validateOffset(pos, index, 'at');
+            write(pos, shape.block, index);
         } else if (['box', 'shell', 'frame', 'replace'].includes(kind)) {
             const region = bounds(shape, kind);
+            validateOffset(region.min, index, 'min');
+            validateOffset(region.max, index, 'max');
             const axes = region.min.map((n, i) => n === region.max[i] ? -1 : i).filter(i => i !== -1);
             if (kind === 'shell' && axes.length !== 3) throw new Error('shell 表示含底和顶的三维外壳，各轴至少 2 格；平面边框请用 frame，实心平面请用 box');
             if (kind === 'frame' && axes.length !== 2) throw new Error('frame 必须是有两个非零跨度的平面边框');
@@ -89,7 +101,7 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
                 if (domain.size > MAX_VOLUME) throw new Error('蓝图超出几何预算');
                 if (kind === 'box' || kind === 'replace' ||
                     (kind === 'frame' ? axes : [0, 1, 2]).some(i => pos[i] === region.min[i] || pos[i] === region.max[i])) {
-                    write(pos, shape.block, kind === 'replace' ? shape.from : undefined);
+                    write(pos, shape.block, index, kind === 'replace' ? shape.from : undefined);
                 }
             }
         } else {
@@ -99,7 +111,6 @@ export function compileBlueprint(spec, origin, availableMaterials = MATERIALS) {
     for (const region of openings) {
         for (const pos of cells(region)) {
             if (++expanded > MAX_VOLUME * 2) throw new Error('开口超出几何预算');
-            if (pos.some(n => Math.abs(n) >= MAX_SPAN) || pos[1] < 0) throw new Error('开口超出蓝图坐标范围');
             domain.set(pos.join(','), pos);
             local.delete(pos.join(','));
         }

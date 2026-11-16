@@ -47,7 +47,7 @@ export class CourseResponses {
         this.provider = provider;
         this.decisionProtocol = provider === 'DeepSeek' ? 'native_functions' : 'json_action';
     }
-    async sendRequest(turns, systemMessage, stop = '***', { signal, runId, onUsage, purpose, nativeFunctions, contextMetrics, blueprintRecovery = false } = {}) {
+    async sendRequest(turns, systemMessage, stop = '***', { signal, runId, onUsage, purpose, nativeFunctions, contextMetrics, blueprintRepair = false, blueprintRecovery = false } = {}) {
         const started = Date.now();
         const provider = this.provider ?? 'Course';
         const fail = (reason, code) => new CourseApiError(reason, code, {}, provider);
@@ -56,6 +56,11 @@ export class CourseResponses {
         const { request_timeout_ms: timeoutMs = 120000, ...params } = this.params;
         const nativeAction = provider === 'DeepSeek' && purpose === 'decision' && nativeFunctions?.length;
         if (provider === 'DeepSeek' && purpose === 'blueprint') {
+            // The official Responses API supports JSON mode for blueprint text.
+            if (this.url === 'https://api.deepseek.com/responses') {
+                params.text ??= { format: { type: 'json_object' } };
+                if (blueprintRepair && (!params.reasoning?.effort || params.reasoning.effort === 'none')) params.reasoning = { effort: 'low' };
+            }
             // Reasoning shares the output budget. Reserve enough room for geometry;
             // a single classified retry disables reasoning if it consumed the budget.
             params.max_output_tokens = Math.max(params.max_output_tokens ?? 4096, 8192);
