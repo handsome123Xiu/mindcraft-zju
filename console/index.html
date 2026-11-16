@@ -833,17 +833,31 @@ function defaultTeamSpec(mode = 'centralized') {
     spec.agents.lead.instructions = '你是工程入口，负责接收用户目标、发布共享蓝图和最终验收。根据关系说明与成员权限组织协作，通过正式任务登记范围和依赖；尊重成员的自主分工。';
     for (const name of ['builder_1', 'builder_2']) spec.agents[name].instructions = '根据关系说明、自己的权限和任务范围协作。可以执行，也可以把自己的部分范围正式委托给相连成员；等待下级完成并验收原始范围后，向任务分配者汇报。遇到阻塞与相连成员沟通，不擅自修改蓝图或扩大权限。';
   }
+  if (mode === 'peers') {
+    // 平等协商范式：没有 lead。入口成员只多两个功能能力位（蓝图发布、收尾
+    // 验收，entryAgent 校验要求），用内联 permissions 表达，头衔与提示均不
+    // 出现 lead/汇报类话术，协商语气由关系边描述承载。
+    spec.entryAgent = 'arch_1';
+    spec.agents = {
+      arch_1: { role: 'builder', position: spec.agents.lead.position,
+        permissions: { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true },
+        instructions: '你是平等协作组成员之一，也是对外接单入口：收到用户目标后先与同伴公开讨论场地证据和分工方案，达成一致后把共享蓝图发布出来（只有你能执行最终发布与全队验收，这是职责分工不是指挥权）。任何成员都可以提议任务和交接范围，你也可以认领同伴提出的范围。' },
+      arch_2: { role: 'builder', position: spec.agents.builder_1.position,
+        instructions: '你是平等协作组成员。与同伴讨论并认领施工范围，按共享蓝图施工；可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' },
+      arch_3: { role: 'builder', position: spec.agents.builder_2.position,
+        instructions: '你是平等协作组成员。与同伴讨论并认领施工范围，按共享蓝图施工；可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' }
+    };
+    spec.edges = relationshipEdges(['arch_1', 'arch_2', 'arch_3'], mode);
+  }
   return spec;
 }
 function applyTeamPreset(mode, reset = false) {
-  const names = agentNames();
-  let spec;
-  if (reset || !names.length) spec = defaultTeamSpec(mode);
-  else {
-    const before = graphToSpec();
-    const entry = before.entryAgent ?? names.find(name => before.agents[name].role === 'lead') ?? names[0];
-    spec = { ...before, entryAgent: entry, edges: relationshipEdges([entry, ...names.filter(name => name !== entry)], mode) };
-  }
+  // 预设按钮的语义是"切换到该范式"：完整加载模板替换画布，而不是在旧画布上
+  // 只重连边（那样成员名/角色/instructions 全沿用上一个预设，看起来没反应）。
+  // 画布已有内容且带未保存修改时先确认，避免吞掉手工编辑。
+  if (agentNames().length && dirty && !reset &&
+      !confirm('画布上有未保存的修改。用新的预设替换当前草稿？')) return;
+  const spec = defaultTeamSpec(mode);
   const title = { centralized: '中心化', peers: '平等协商', hierarchy: '层级协作' }[mode];
   showPresetDraft(spec, title);
 }
@@ -868,37 +882,17 @@ function applyVotingPreset() {
     [[0.5, 0.22], [0.22, 0.63], [0.78, 0.63], [0.5, 0.81]]);
 }
 function applyFixedMemberPreset(mode, title, defaults, positions) {
-  const before = graphToSpec();
-  const existing = Object.keys(before.agents);
-  const size = defaults.length;
-  const useExisting = existing.length > 0 && existing.length <= size;
-  if (existing.length > size && !confirm(title + '需要 ' + size + ' 位成员。用新的预设替换当前画布草稿？')) return;
-  const entry = before.entryAgent ?? existing.find(name => before.agents[name].role === 'lead') ?? existing[0];
-  const names = useExisting ? [entry, ...existing.filter(name => name !== entry)] : [];
-  while (useExisting && names.length < defaults.length) {
-    const base = defaults[names.length];
-    let next = base;
-    for (let suffix = 2; names.includes(next); suffix++) next = base + '_' + suffix;
-    names.push(next);
-  }
-  return loadRolePreset(mode, title, before, names, useExisting, index => positions[index]);
+  // 与 applyTeamPreset 一致：预设切换 = 完整模板替换画布。旧逻辑在非空画布上
+  // 沿用现有成员名（useExisting），导致点第二个预设时画布几乎不变。
+  if (agentNames().length && dirty &&
+      !confirm(title + '预设将替换当前画布草稿（含未保存的修改）。继续？')) return;
+  return loadRolePreset(mode, title, graphToSpec(), [], false, index => positions[index]);
 }
 async function applyRouterPreset() {
-  const before = graphToSpec();
-  const existing = Object.keys(before.agents);
-  const lead = before.entryAgent ?? existing.find(name => before.agents[name].role === 'lead') ?? existing[0];
-  const remaining = existing.filter(name => name !== lead);
-  let router = remaining.find(name => before.agents[name].role === 'router');
-  if (!router) {
-    router = 'router';
-    for (let suffix = 2; existing.includes(router); suffix++) router = 'router_' + suffix;
-  }
-  const names = lead ? [lead, router, ...remaining.filter(name => name !== router)] : [];
-  for (let suffix = 1; lead && names.length < 4; suffix++) {
-    const name = 'builder_' + suffix;
-    if (!names.includes(name)) names.push(name);
-  }
-  return loadRolePreset('router', '模型路由', before, names, !!lead, (index, count) =>
+  // 同 applyFixedMemberPreset：完整模板替换，不复用旧画布成员名。
+  if (agentNames().length && dirty &&
+      !confirm('模型路由预设将替换当前画布草稿（含未保存的修改）。继续？')) return;
+  return loadRolePreset('router', '模型路由', graphToSpec(), [], false, (index, count) =>
     index < 2 ? [0.5, index === 0 ? 0.2 : 0.45] : [(index - 1) / (count - 1), 0.77]);
 }
 async function loadRolePreset(mode, title, before, names, useExisting, positionFor) {

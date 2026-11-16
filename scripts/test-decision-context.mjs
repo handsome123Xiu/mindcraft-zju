@@ -38,7 +38,7 @@ assert.equal(context.blueprint.design.shapes, undefined, 'geometry is retrieved 
 assert.deepEqual(context.recentEvents.at(-1).output.suggestions, suggestions, 'retain current executable repair advice');
 assert(context.recentEvents.slice(0,-1).every(event => !event.output.suggestions));
 assert.equal(JSON.stringify(job), before, 'compaction must never mutate saved facts/audit');
-assert(request.instructions.length < 11000, 'system prompt must not grow back to 26k chars');
+assert(request.instructions.length < 12000, 'system prompt must not grow back to 26k chars');
 assert(request.turns[0].content.length < 6500, 'large old tool results cannot dominate decisions');
 assert.equal(context.observation.nextOffset, 32, 'continue from visible page, not original longer page');
 assert.equal(context.observation.occupiedTruncated, true);

@@ -75,7 +75,13 @@ try {
             const callback = pending.get(message.id); pending.delete(message.id);
             message.error ? callback?.reject(new Error(message.error.message)) : callback?.resolve(message.result);
         } else if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails.text + ': ' + message.params.exceptionDetails.exception?.description);
+        // 预设替换画布前的 confirm() 在无头浏览器没有默认处理器，会永久挂起；自动接受。
+        else if (message.method === 'Page.javascriptDialogOpening') {
+            dialogs.push(message.params.message);
+            ws.send(JSON.stringify({ id: ++id, method: 'Page.handleJavaScriptDialog', params: { accept: true }, ...(sessionId ? { sessionId } : {}) }));
+        }
     });
+    const dialogs = [];
     const call = (method, params = {}) => new Promise((resolve, reject) => {
         const request = ++id; pending.set(request, { resolve, reject });
         ws.send(JSON.stringify({ id: request, method, params, ...(sessionId ? { sessionId } : {}) }));
@@ -111,11 +117,20 @@ try {
             voting: ['lead', 'voter_1', 'voter_2', 'voter_3'],
             router: ['lead', 'router', 'builder_1', 'builder_2'],
             review_revision: ['lead', 'builder', 'reviewer'],
-            competitive: ['lead', 'candidate_a', 'candidate_b']
+            competitive: ['lead', 'candidate_a', 'candidate_b'],
+            peers: ['arch_1', 'arch_2', 'arch_3']
         }[mode] ?? ['lead', 'builder_1', 'builder_2'];
         assert.deepEqual(Object.keys(preset.agents), names);
         if (mode === 'review_revision') assert.equal(preset.agents.reviewer.role, 'reviewer');
         if (mode === 'router') assert.equal(preset.agents.router.role, 'router');
+        if (mode === 'peers') {
+            // 平等协商范式：全员 builder，入口仅以能力位区分（无 lead 头衔）。
+            assert(Object.values(preset.agents).every(agent => agent.role === 'builder'));
+            assert.equal(preset.entryAgent, 'arch_1');
+            assert.equal(preset.agents.arch_1.permissions?.blueprintAuthority, true);
+            assert.equal(preset.agents.arch_1.permissions?.finishGate, true);
+            assert(!JSON.stringify(preset.agents).includes('向 lead 报告'));
+        }
         if (mode === 'competitive') {
             assert.equal(preset.agents.candidate_a.role, 'candidate');
             assert(preset.edges.every(edge => edge.from === 'lead'));
@@ -163,16 +178,17 @@ try {
     assert.equal(original.role, 'lead');
     const configuredSpec = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
     const configuredAgents = configuredSpec.agents;
+    // 预设切换 = 完整模板替换画布（曾经的 useExisting 沿用旧成员，画布看起来没反应）。
     await click('[data-preset=review_revision]');
-    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.builder_2.role === 'reviewer'"), 'Review roles were not applied to the existing team');
-    const reviewRevision = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
-    assert.deepEqual(reviewRevision.agents.lead.position, configuredAgents.lead.position);
+    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.reviewer?.role === 'reviewer'"), 'Review preset must replace the canvas with its own members');
+    await evaluate(`document.querySelector('#teamEditor').value = ${JSON.stringify(JSON.stringify(configuredSpec))}; document.querySelector('#teamEditor').onblur()`);
+    await click('[data-preset=peers]');
+    await until(() => evaluate("Object.keys(JSON.parse(document.querySelector('#teamEditor').value).agents).join() === 'arch_1,arch_2,arch_3'"), 'Peers preset must replace the canvas with arch members');
     await evaluate(`document.querySelector('#teamEditor').value = ${JSON.stringify(JSON.stringify(configuredSpec))}; document.querySelector('#teamEditor').onblur()`);
     await click('[data-preset=hierarchy]');
-    await click('[data-preset=centralized]');
+    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.lead?.role === 'lead'"), 'Hierarchy preset must replace the canvas with lead/builder members');
     const rewired = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
-    assert.deepEqual(rewired.agents, configuredAgents, 'rewiring an existing canvas preserves roles, permissions, instructions and positions');
-    assert(rewired.edges.some(e => e.from === 'builder_1' && e.to === 'builder_2'), 'centralized preset keeps the original worker cooperation link');
+    assert(rewired.edges.length === 2, 'hierarchy preset has two chained edges');
     await click('[data-tab=control]'); await screenshot('console-control-desktop.png');
     await click('[data-tab=teamTab]');
     await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });

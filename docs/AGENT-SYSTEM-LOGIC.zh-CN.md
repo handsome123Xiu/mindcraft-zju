@@ -8,14 +8,13 @@
 
 当前默认系统是一个面向 Minecraft 创造模式建筑任务的、可持久化的“观察—计划—行动—检查”循环。模型选择下一步，程序执行有边界的工具并核验结果。它同时支持聊天、建造、显式拆除，以及通过控制台启动的多 Agent 协作。
 
-仓库里存在两条不同的 Agent 路径，分析时必须区分：
+仓库里当前只有一条 Agent 执行路径：
 
 | 路径 | 地位 | 主要机制 |
 |---|---|---|
 | `main.js → src/building/start.js → loop-agent.js` | 当前默认执行路径 | JSON 动作/原生函数、结构化计划、蓝图、确定性工具、现场验收 |
-| `src/mindcraft/ → src/process/ → src/agent/agent.js` | 保留的旧版通用系统 | 对话生成 `!command`、技能库、可选动态代码、自然语言记忆、自提示 |
 
-`npm start` 和 `Start-Mindcraft.cmd` 最终都执行 `main.js`。它只调用 `startBuildingAgent()`，没有启动旧版 MindServer 或旧 `Agent` 类。新版会复用旧目录中的 `creative_items.js` 作为底层兼容适配，但这不意味着旧版控制循环也在运行。
+`npm start` 和 `Start-Mindcraft.cmd` 最终都执行 `main.js`。它只调用 `startBuildingAgent()`。新版会复用 `src/agent/library/creative_items.js` 作为底层兼容适配（该目录下仅保留此文件）。上游的旧版通用系统（`src/mindcraft/`、`src/process/`、`src/agent/agent.js` 及其依赖、多数模型 provider）已于 2026-11-16 从仓库移除；其逻辑见第 16 节的文字记录。
 
 ```mermaid
 flowchart TD
@@ -443,7 +442,7 @@ checkpoint 先做结构化拷贝，通过串行 Promise 队列写入；启动器
 
 当前主循环的短期历史按 owner 保存在进程内 Map，并进入任务 state；没有使用旧 History 的模型摘要记忆，也没有向量检索型长期记忆或自动学习技能的过程。
 
-**16. 旧版通用 Agent 的逻辑，供阅读保留代码时对照**
+**16. 旧版通用 Agent 的逻辑（历史记录；对应代码已于 2026-11-16 移除）**
 
 旧链路从 `mindcraft.createAgent()` 经 `AgentProcess` 启动 `init_agent.js`，实例化 `Agent`。初始化 Prompter、History、ActionManager、Coder、NPCController、MemoryBank、SelfPrompter 和任务模块；如开启 explicit_task_planning，还初始化 TaskPlan。
 

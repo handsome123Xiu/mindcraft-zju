@@ -109,17 +109,28 @@ export async function startBuildingAgent() {
             });
             bot.once('end', unregister);
             bot.once('kicked', unregister);
+            // Agent 间协商消息镜像到游戏聊天框，玩家能直接看到 agent 之间的沟通。
+            // 私聊用 /msg、广播用公屏；镜像失败（掉线等）不影响真实投递。
+            const mirrorChat = (recipient, text) => {
+                if (bot._client?.state !== 'play' || !bot.entity) return;
+                const body = '[-> ' + recipient + '] ' + String(text ?? '').slice(0, 180);
+                try { bot.chat(body); } catch { /* 镜像失败不影响投递 */ }
+            };
             let peers = {
                 isPeer: peerName => peerName !== name && (listPeers(name).some(peer => peer.name === peerName) ||
                     drainMailboxCache.has(peerName)),
                 list: () => listPeers(name),
                 async sendToAgent(recipient, text) {
+                    mirrorChat(recipient, text);
                     const result = await deliverDirect(peerMessage(name, recipient, text));
                     if (result.delivered) return { status: 'delivered', recipient, channel: 'direct' };
                     await appendMailbox(botsDir, recipient, peerMessage(name, recipient, text));
                     return { status: 'delivered', recipient, channel: 'mailbox', directAttempt: result };
                 },
-                async broadcast(text) { return broadcastPeers(name, text, name); }
+                async broadcast(text) {
+                    mirrorChat('(team)', text);
+                    return broadcastPeers(name, text, name);
+                }
             };
             // 信箱轮询缓存：把离线队友名记住，让 isPeer 对曾出现在信箱目录的名字返回 true。
             const drainMailboxCache = new Set();
@@ -164,7 +175,20 @@ export async function startBuildingAgent() {
                 if (!process.send) throw new Error('团队成员需要由控制台启动');
                 teamClient = createTeamClient({ name, spec: managedSpec });
                 team = teamClient;
-                peers = teamClient.peers;
+                // 团队模式下 peers 走 supervisor IPC；包装一层，消息同样镜像到游戏聊天框。
+                const directPeers = teamClient.peers;
+                peers = {
+                    isPeer: directPeers.isPeer,
+                    list: directPeers.list,
+                    async sendToAgent(recipient, text, job) {
+                        mirrorChat(recipient, text);
+                        return directPeers.sendToAgent(recipient, text, job);
+                    },
+                    async broadcast(text, job) {
+                        mirrorChat('(team)', text);
+                        return directPeers.broadcast(text, job);
+                    }
+                };
             }
             const options = {
                 world,

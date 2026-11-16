@@ -89,8 +89,8 @@ npm run check:publish
 
 | 路径 | 内容 |
 |---|---|
-| `src/` | Agent、技能、规划、代码执行、模型适配及服务源码 |
-| `profiles/`、`tasks/` | 保留的上游配置与任务资源 |
+| `src/` | 建筑 Agent、蓝图、施工、模型适配及控制台源码 |
+| `profiles/` | 保留的上游模型配置 |
 | `patches/` | 固定依赖版本对应的修复补丁 |
 | `scripts/` | 配置生成、启动检查、回归测试和发布检查 |
 | `andy.example.json`、`keys.example.json` | 无密钥配置模板 |

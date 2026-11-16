@@ -18,6 +18,8 @@ code_records/
 experiments/
 wandb/
 tmp/
+.tmp*/
+.zcode/
 .idea/
 .vscode/
 **/__pycache__/

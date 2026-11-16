@@ -133,11 +133,38 @@ export function validateTeamSpec(spec) {
 }
 
 // ---- 预设模板：前端一键生成 spec 的工厂 ----
+// 每个角色的 instructions 与前端 defaultTeamSpec 保持同一套话术：API 调用方与
+// 控制台点预设拿到的行为定义必须一致，否则手写 team.json 的团队会"裸奔"。
+const PRESET_INSTRUCTIONS = {
+    centralized: {
+        entry: '你是团队中心，对整体目标和最终结果负责。观察场地、设计共享蓝图，根据实际支撑、通行、工作量、成员位置和进展自主分工：可以派不同模块，也可以给同一模块划定互不重叠的 scope 范围让成员一起建。不预设左右分区或必须同时开工；独立任务先全部派出，只有真实依赖才等待。允许 builder 交流并通过协作提案交接自己的局部工作。监督进度、调整阻塞任务，最后验收全部蓝图及空位并汇报。',
+        member: '你是施工成员，按共享蓝图和任务 scope 施工；同一模块可有其他成员参与。根据现场选择顺序，与队友交流支撑、分工、让路和协助。需要分担时 propose_task_share 提出自己的局部范围，队友 respond_task_share 接受后，由你在动作之间 commit_task_share 正式交接。只有收到运行时任务才开工。交接后原目标仍由你负责，等待协作者完成并验收完整原任务后 complete_task。遇到阻塞向 lead 报告，不能擅改蓝图。requirements 保持原文，进度写入步骤 evidence。'
+    },
+    peers: {
+        entry: '你是平等协作组成员之一，也是对外接单入口：收到用户目标后先与同伴公开讨论场地证据和分工方案，达成一致后把共享蓝图发布出来（只有你能执行最终发布与全队验收，这是职责分工不是指挥权）。任何成员都可以提议任务和交接范围，你也可以认领同伴提出的范围。',
+        member: '你是平等协作组成员。与同伴讨论并认领施工范围，按共享蓝图施工；可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。'
+    },
+    hierarchy: {
+        entry: '你是工程入口，负责接收用户目标、发布共享蓝图和最终验收。根据关系说明与成员权限组织协作，通过正式任务登记范围和依赖；尊重成员的自主分工。',
+        member: '根据关系说明、自己的权限和任务范围协作。可以执行，也可以把自己的部分范围正式委托给相连成员；等待下级完成并验收原始范围后，向任务分配者汇报。遇到阻塞与相连成员沟通，不擅自修改蓝图或扩大权限。'
+    }
+};
 function preset(names, mode) {
     const pairs = mode === 'hierarchy' ? names.slice(1).map((to, i) => [names[i], to]) :
         names.flatMap((from, i) => names.slice(i + 1).map(to => [from, to]));
+    // peers 模式没有权力中心：所有成员同为 builder，仅在能力位上区分职责。
+    // 入口成员补 blueprintAuthority/finishGate，是"任务接单 + 蓝图发布 + 收尾
+    // 验收"的功能锚点（entryAgent 校验要求），不是指挥权。
+    const agents = mode === 'peers'
+        ? Object.fromEntries(names.map((name, i) => [name, i === 0
+            ? { role: 'builder', permissions: { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true },
+                instructions: PRESET_INSTRUCTIONS.peers.entry }
+            : { role: 'builder', instructions: PRESET_INSTRUCTIONS.peers.member }]))
+        : Object.fromEntries(names.map((name, i) => [name, i === 0
+            ? { role: 'lead', instructions: PRESET_INSTRUCTIONS[mode].entry }
+            : { role: 'builder', instructions: PRESET_INSTRUCTIONS[mode].member }]));
     return { coordination: 'relationships', entryAgent: names[0],
-        agents: Object.fromEntries(names.map((name, i) => [name, { role: i === 0 ? 'lead' : 'builder' }])),
+        agents,
         edges: pairs.map(([from, to]) => ({ from, to, description: mode === 'hierarchy' || (mode === 'centralized' && from === names[0]) ?
             `${from} 分配目标和范围，${to} 按权限执行或组织下级完成，并汇报结果。` : `${from} 与 ${to} 平等协商，根据能力分担工作；通过正式任务或交接记录避免重复施工。` })) };
 }
