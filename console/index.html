@@ -110,6 +110,7 @@
             <button class="primary" data-preset="router">模型路由</button>
             <button class="primary" data-preset="competitive">竞争择优</button>
             <button class="primary" data-preset="voting">多数投票</button>
+            <span class="muted">切换预设会更新角色、职责、权限及连线；保留适用成员的名称、模型与位置。</span>
           </div>
         </div>
       </div>
@@ -842,7 +843,18 @@ function applyTeamPreset(mode, reset = false) {
   else {
     const before = graphToSpec();
     const entry = before.entryAgent ?? names.find(name => before.agents[name].role === 'lead') ?? names[0];
-    spec = { ...before, entryAgent: entry, edges: relationshipEdges([entry, ...names.filter(name => name !== entry)], mode) };
+    const ordered = [entry, ...names.filter(name => name !== entry)];
+    const defaults = defaultTeamSpec(mode);
+    spec = { coordination: 'relationships', entryAgent: entry,
+      agents: Object.fromEntries(ordered.map((name, index) => {
+        const template = defaults.agents[index === 0 ? 'lead' : index % 2 ? 'builder_1' : 'builder_2'];
+        const previous = before.agents[name];
+        return [name, { ...structuredClone(template),
+          instructions: template.instructions.replace(/\blead\b/g, entry),
+          ...(previous.profile ? { profile: previous.profile } : {}),
+          position: previous.position ?? template.position }];
+      })),
+      edges: relationshipEdges(ordered, mode) };
   }
   const title = { centralized: '中心化', peers: '平等协商', hierarchy: '层级协作' }[mode];
   showPresetDraft(spec, title);

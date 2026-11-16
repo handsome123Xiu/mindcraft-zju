@@ -171,7 +171,46 @@ try {
     await click('[data-preset=hierarchy]');
     await click('[data-preset=centralized]');
     const rewired = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
-    assert.deepEqual(rewired.agents, configuredAgents, 'rewiring an existing canvas preserves roles, permissions, instructions and positions');
+    assert.equal(rewired.agents.lead.role, 'lead', 'a preset replaces the previous custom role');
+    assert.equal(rewired.agents.lead.permissions, undefined, 'a preset resets permissions to its own role defaults');
+    for (const name of Object.keys(configuredAgents)) assert.deepEqual(rewired.agents[name].position, configuredAgents[name].position);
+    // Reproduce special-preset -> basic-preset switches, including a custom entry
+    // that is not the first member. Identity/profile/layout survive; duties do not.
+    for (const sourceMode of ['competitive', 'voting', 'router', 'review_revision']) {
+        const prior = TEAM_PRESETS[sourceMode]();
+        const oldEntry = prior.entryAgent;
+        prior.agents.chief = { ...prior.agents[oldEntry] };
+        delete prior.agents[oldEntry];
+        prior.entryAgent = 'chief';
+        prior.edges = prior.edges.map(edge => ({ ...edge, from: edge.from === oldEntry ? 'chief' : edge.from, to: edge.to === oldEntry ? 'chief' : edge.to }));
+        for (const [i, agent] of Object.values(prior.agents).entries()) {
+            agent.profile = 'profiles/member_' + i + '.json';
+            agent.position = { x: 150 + i * 100, y: 100 + i * 50 };
+        }
+        for (const targetMode of ['peers', 'hierarchy', 'centralized']) {
+            await evaluate('document.querySelector("#teamEditor").value = ' + JSON.stringify(JSON.stringify(prior)) + '; document.querySelector("#teamEditor").onblur()');
+            await click('[data-preset=' + targetMode + ']');
+            const changed = await evaluate('JSON.parse(document.querySelector("#teamEditor").value)');
+            assert(validateTeamSpec(changed).ok, sourceMode + ' -> ' + targetMode);
+            assert.equal(changed.entryAgent, 'chief');
+            assert.deepEqual(Object.keys(changed.agents).sort(), Object.keys(prior.agents).sort());
+            for (const [name, agent] of Object.entries(changed.agents)) {
+                assert.equal(agent.role, name === 'chief' ? 'lead' : 'builder');
+                assert.equal(agent.permissions, undefined, 'stale special-role restrictions must be cleared');
+                assert.equal(agent.profile, prior.agents[name].profile);
+                assert.deepEqual(agent.position, prior.agents[name].position);
+                assert(!/开始评选|开始计票|参赛方案|征集投票|你专职路由|你负责语义审查/.test(agent.instructions));
+            }
+            assert.equal(changed.edges.length, targetMode === 'hierarchy' ? Object.keys(prior.agents).length - 1 : Object.keys(prior.agents).length * (Object.keys(prior.agents).length - 1) / 2);
+            if (targetMode === 'hierarchy') assert.equal(changed.edges[0].from, 'chief');
+            await click('#applyCanvas');
+            await until(() => saved?.agents?.chief?.role === 'lead' && saved.edges.length === changed.edges.length, 'Switched preset was not saved');
+            await call('Page.reload');
+            await until(() => evaluate('document.querySelectorAll("#teamCanvas g").length === ' + Object.keys(prior.agents).length), 'Switched preset did not reload');
+            const restored = await evaluate('JSON.parse(document.querySelector("#teamEditor").value)');
+            assert.deepEqual(restored.agents, changed.agents, 'saved switch must retain the new roles and profiles');
+        }
+    }
     assert(rewired.edges.some(e => e.from === 'builder_1' && e.to === 'builder_2'), 'centralized preset keeps the original worker cooperation link');
     await click('[data-tab=control]'); await screenshot('console-control-desktop.png');
     await click('[data-tab=teamTab]');
