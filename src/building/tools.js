@@ -299,7 +299,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             snapshot();
             if (!job.plan.requirements.length) throw new Error('先用 update_plan 记录原始需求和整体计划');
             const origin = args.origin == null ? job.origin : coordinates(args.origin, '设计原点');
-            nearSite(origin, 16);
+            nearSite(origin, 32);
             if (job.originLocked && origin.some((n, i) => n !== job.origin[i])) throw new Error('用户指定的施工原点不能移动');
             const preserve = completedCells();
             const proposed = await design({ request: args.brief == null ? job.request : requiredText(args.brief, '设计要求'),
