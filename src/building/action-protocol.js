@@ -65,7 +65,9 @@ const step = object({ id: string, title: { ...string, maxLength: 200 }, success:
 step.properties.evidence = { type: 'string', maxLength: 1000 };
 export const ACTION_SCHEMAS = Object.freeze({
     complete_task: object({ action: { const: 'complete_task' }, summary: string }, ['action', 'summary']),
-    wait_for_team: object({ action: { const: 'wait_for_team' }, reason: string }, ['action', 'reason']),
+    // reason 可选：glm-low 曾三次原样重发 {"action":"wait_for_team"} 缺 reason
+    // 触发熔断，把 454 格的施工任务连带取消。等待意图本身无歧义，无需仪式性字段。
+    wait_for_team: object({ action: { const: 'wait_for_team' }, reason: { ...string, maxLength: 500 } }, ['action']),
     update_plan: object({ action: { const: 'update_plan' }, requirements: array(object({ id: string, description: string }, ['id', 'description']), 200),
         steps: { ...array(step, 200), minItems: 1 }, patch: { type: 'boolean' } }, ['action', 'steps']),
     tool: object({ action: { const: 'tool' }, name: { enum: Object.keys(TOOL_SCHEMAS) }, args: { type: 'object' } }, ['action', 'name', 'args']),

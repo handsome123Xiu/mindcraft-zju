@@ -198,7 +198,16 @@ export async function startBuildingAgent() {
                     await mkdir(directory, { recursive: true });
                     const target = join(directory, id + '.' + type + '.json');
                     await writeFile(target + '.tmp', JSON.stringify(data, null, 2) + '\n');
-                    await rename(target + '.tmp', target);
+                    // Windows/杀毒软件可能短暂锁住目标文件，rename 抛 EPERM（实测
+                    // arch_3 end_turn 后落盘失败）。重试覆盖，仍失败则退回原子的
+                    // write-then-unlink 语义：直接写目标，避免丢整个 checkpoint。
+                    try { await rename(target + '.tmp', target); }
+                    catch (error) {
+                        if (error.code !== 'EPERM' && error.code !== 'EACCES') throw error;
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                        try { await rename(target + '.tmp', target); }
+                        catch { await writeFile(target, JSON.stringify(data, null, 2) + '\n'); }
+                    }
                 },
                 report(event, data) {
                     if (event === 'team_error') { console.error('[Team]', data.reason); return; }

@@ -406,7 +406,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                         else if ((job.teamEventRevision ?? 0) !== teamRevision) output = { status: 'received', message: '有新的团队事件，请读取后继续决策' };
                         else {
                             session.waitRevision = teamRevision;
-                            result = { status: 'waiting_team', reason: requiredText(action.reason, '等待原因') };
+                            result = { status: 'waiting_team', reason: action.reason?.trim() || '等待团队任务事件' };
                             output = result;
                         }
                     }
