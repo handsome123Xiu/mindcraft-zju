@@ -147,7 +147,14 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
     }
 
     function nearSite(position, radius = 256) {
-        if (Math.hypot(...position.map((n, i) => n - job.origin[i])) > radius) throw new Error('操作位置超出本次工地范围');
+        if (Math.hypot(...position.map((n, i) => n - job.origin[i])) > radius) {
+            // 裸文本错误不给可恢复信息，模型只能盲改重试（pyramid 8cb3e954 事故：
+            // 17.3 格 > 16 被拒后连续 3 次协议损坏触发熔断）。
+            throw ruleError('OUT_OF_SITE', '操作位置超出本次工地范围：任务原点 [' + job.origin.join(',') +
+                ']，允许半径 ' + radius + ' 格，本次提交 [' + position.map(Math.round).join(',') + '] 距离 ' +
+                Math.round(Math.hypot(...position.map((n, i) => n - job.origin[i]))) + ' 格',
+                '把 origin/坐标移动到任务原点 ' + radius + ' 格以内再重试；设计大型建筑时让设计原点尽量贴近任务原点，仅用形状偏移覆盖外围');
+        }
     }
 
     function assignment() {
