@@ -101,7 +101,7 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
 
 {
     const builder = fixture();
-    await assert.rejects(builder.tools.useSkill('design_blueprint', {}), /lead 统一设计/);
+    await assert.rejects(builder.tools.useSkill('design_blueprint', {}), /缺少蓝图设计权限/);
     const inspector = fixture({ role: 'inspector' });
     await assert.rejects(inspector.tools.call('place_block', { position: [0, 0, 0], block: 'stone' }), /团队角色 inspector 不允许/);
     // beta 持有 part-1 租约时，alpha 施工该部件被拒；claim 抢不到（conflict 由模型换部件）。
