@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { addTokenUsage, emptyTokenUsage, formatTokenUsage } from './token-usage.js';
 
 class ApiCheckTimeout extends Error {}
@@ -14,6 +15,7 @@ function failureReason(error, timeoutMs) {
     if (status === '404') return '接口或模型不存在（HTTP 404），请检查 API 地址和模型名';
     if (status === '402') return '账户余额不足（HTTP 402），请检查 API 账户余额';
     if (status === '429') return '请求限流或额度不足（HTTP 429）';
+    if (['502', '503', '504'].includes(status)) return '模型网关或上游服务暂时不可用（HTTP ' + status + '），请稍后重试；切换同一网关的模型未必有效';
     if (status) return '服务请求失败（HTTP ' + status + '），请查看 logs/api-usage.jsonl';
     if (/API key "COURSE_API_KEY" not found/.test(message)) return '缺少 COURSE_API_KEY，请检查 keys.json 或环境变量';
     if (/API key "DEEPSEEK_API_KEY" not found/.test(message)) return '缺少 DEEPSEEK_API_KEY，请检查 keys.json 或环境变量';
@@ -23,8 +25,9 @@ function failureReason(error, timeoutMs) {
     return '网络异常或接口未返回完整回复，请查看 logs/api-usage.jsonl';
 }
 
-export async function checkApiConnection({ model, report, signal, timeoutMs = 60000 }) {
+export async function checkApiConnection({ model, report, signal, timeoutMs = 60000, retryDelayMs = 1000 }) {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('API 检测时限无效');
+    if (!Number.isFinite(retryDelayMs) || retryDelayMs < 0 || retryDelayMs > 10000) throw new Error('API 重试间隔无效');
     const started = Date.now();
     const runId = 'startup-api-' + randomUUID();
     const tokenUsage = emptyTokenUsage();
@@ -32,7 +35,8 @@ export async function checkApiConnection({ model, report, signal, timeoutMs = 60
     const checkSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
     let rejectOnAbort;
     let usageReceived = false;
-    let requestStarted = false;
+    let requestCount = 0;
+    let usageCount = 0;
     let finished = false;
     let timer;
     let result;
@@ -46,16 +50,32 @@ export async function checkApiConnection({ model, report, signal, timeoutMs = 60
             if (checkSignal.aborted) rejectOnAbort();
         });
         const response = await Promise.race([
-            Promise.resolve().then(() => {
-                checkSignal.throwIfAborted();
-                requestStarted = true;
-                return model.sendRequest([{ role: 'user', content: 'Test the API connection. Reply exactly with {"status":"ok"}.' }],
-                    'This is a connection test, not a Minecraft task. Output only the JSON object {"status":"ok"}. Do not use tools or add explanations.',
-                    null, { signal: checkSignal, runId, purpose: 'startup', onUsage(usage) {
-                        if (finished || usageReceived) return;
-                        usageReceived = true;
-                        addTokenUsage(tokenUsage, usage);
-                    } });
+            Promise.resolve().then(async () => {
+                // Only retry explicit transient gateway failures. Configuration,
+                // authentication and malformed replies need a different remedy.
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                    checkSignal.throwIfAborted();
+                    let attemptUsageReceived = false;
+                    requestCount++;
+                    try {
+                        return await model.sendRequest([{ role: 'user', content: 'Test the API connection. Reply exactly with {"status":"ok"}.' }],
+                            'This is a connection test, not a Minecraft task. Output only the JSON object {"status":"ok"}. Do not use tools or add explanations.',
+                            null, { signal: checkSignal, runId, purpose: 'startup', onUsage(usage) {
+                                if (finished || attemptUsageReceived) return;
+                                attemptUsageReceived = true;
+                                usageReceived = true;
+                                usageCount++;
+                                addTokenUsage(tokenUsage, usage);
+                            } });
+                    } catch (error) {
+                        checkSignal.throwIfAborted();
+                        if (error?.code !== 'API_HTTP_ERROR' || ![502, 503, 504].includes(error.httpStatus) || attempt === 3) throw error;
+                        // Backoff with jitter avoids all team members retrying together.
+                        const waitMs = Math.round(retryDelayMs * (2 ** (attempt - 1) + Math.random() * 0.5));
+                        report('模型服务暂时不可用（HTTP ' + error.httpStatus + '），' + (waitMs / 1000).toFixed(1) + ' 秒后重试（' + (attempt + 1) + '/3）……');
+                        await delay(waitMs, undefined, { signal: checkSignal });
+                    }
+                }
             }),
             cancelled
         ]);
@@ -73,7 +93,7 @@ export async function checkApiConnection({ model, report, signal, timeoutMs = 60
         finished = true;
         clearTimeout(timer);
         if (rejectOnAbort) checkSignal.removeEventListener('abort', rejectOnAbort);
-        if (requestStarted && !usageReceived) tokenUsage.unreportedRequests++;
+        tokenUsage.unreportedRequests += requestCount - usageCount;
     }
     result = { ...result, runId, elapsedMs: Date.now() - started, tokenUsage };
     if (result.status !== 'cancelled') {

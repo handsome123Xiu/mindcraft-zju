@@ -473,11 +473,14 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                         ((model.decisionProtocol === 'native_functions' || model.provider === 'DeepSeek') ?
                             'Correct the named field using expected, then call the provided native function directly. No submit_action/tool/batch wrapper or action field. Tool calls and update_plan may share a response; design/wait/finish must be called alone. New plan steps require id,title,success; patch=true updates existing steps and appends new IDs in order.' :
                             'Correct the named field using expected. The response must be ONE JSON object with a top-level "action" field — using the action name as the only top-level key (e.g. {"update_plan":{...}}) is invalid; write {"action":"update_plan",...} instead. Tool example: {"action":"tool","name":"inspect_build","args":{}}. New plan step requires id,title,success; patch=true updates existing steps and appends new IDs in order.') : null;
+                    const blueprintRecovery = ['INVALID_BLUEPRINT_JSON', 'INVALID_BLUEPRINT_GEOMETRY'].includes(error.code) ?
+                        'The design model could not compile its draft after repair. Use the reported field/message to correct the brief or choose a buildable origin only if needed, then call design_blueprint again. Tool help alone does not change the draft.' : null;
+                    const recovery = protocolRecovery ?? blueprintRecovery ?? error.recovery;
                     output = { status: error instanceof InputChangedError ? 'superseded' : 'error', message: error.message,
                         ...(error.code ? { code: error.code } : {}),
                         ...(error.field ? { field: error.field, expected: error.expected } : {}),
                         ...(error.position ? { position: error.position } : {}),
-                        ...(protocolRecovery ? { recovery: protocolRecovery } : error.recovery ? { recovery: error.recovery } : {}),
+                        ...(recovery ? { recovery } : {}),
                         // 被拒动作的紧凑摘要：让模型直接对照"我提交了什么"与错误，
                         // 而不是只看到错误文本后重写措辞。
                         ...(action && error instanceof InputChangedError === false && action.action ? { rejectedAction: compactResult({
