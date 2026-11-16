@@ -193,11 +193,13 @@ const server = createServer(async (request, response) => {
             return json(response, 200, await teamSupervisor.start({ ...options, spec: await readTeamSpec(join(root, 'bots')), settings: await readSettings() }));
         }
         if (request.method === 'POST' && path === '/api/team/stop') return json(response, 200, await teamSupervisor.stop());
-        if (request.method === 'GET' && ['/api/team/presets/review_revision', '/api/team/presets/pipeline', '/api/team/presets/router', '/api/team/presets/competitive', '/api/team/presets/voting'].includes(path)) {
+        const presetRequest = path.match(/^\/api\/team\/presets\/([a-z_]+)$/);
+        if (request.method === 'GET' && presetRequest) {
             const { TEAM_PRESETS, validateTeamSpec } = await import(moduleUrl('src/building/team-state.js'));
+            const [, key] = presetRequest;
+            if (!Object.hasOwn(TEAM_PRESETS, key)) return json(response, 404, { error: '未知协作范式：' + key });
             const names = url.searchParams.getAll('name');
-            const key = path.split('/').at(-1);
-            const preset = TEAM_PRESETS[key === 'pipeline' ? 'review_revision' : key];
+            const preset = TEAM_PRESETS[key];
             const spec = preset(names.length ? names : undefined);
             if (preset === TEAM_PRESETS.router) {
                 for (const [name, agent] of Object.entries(spec.agents)) {
@@ -224,7 +226,8 @@ const server = createServer(async (request, response) => {
         if (request.method === 'POST' && path === '/api/team') {
             const { validateTeamSpec, TEAM_PRESETS } = await import(moduleUrl('src/building/team-state.js'));
             const { spec, preset, names, profile } = await readBody(request);
-            const candidate = preset ? TEAM_PRESETS[preset === 'pipeline' ? 'review_revision' : preset](names) : spec;
+            if (preset && !Object.hasOwn(TEAM_PRESETS, preset)) return json(response, 400, { error: '未知协作范式：' + preset });
+            const candidate = preset ? TEAM_PRESETS[preset](names) : spec;
             if (!candidate) throw new Error('缺少 spec 或 preset');
             const validation = validateTeamSpec(candidate);
             if (!validation.ok) return json(response, 400, { error: validation.errors.join('；'), validation });

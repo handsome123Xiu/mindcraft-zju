@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
 export function createTeamClient({ name, spec, channel = process, onError = error => console.error('[Team]', error.message) }) {
+    const members = Object.keys(spec.agents);
+    const entry = spec.entryAgent ?? members.find(agent => spec.agents[agent].role === 'lead') ?? members[0];
     const pending = new Map();
     const results = new Map();
     let controller, busy = false, ticking = false, closed = false;
+    let latestReply, resumedReply;
     const send = (method, args = {}) => new Promise((resolve, reject) => {
         if (closed || !channel.connected) return reject(new Error('团队运行时已断开'));
         const id = randomUUID();
@@ -56,6 +59,22 @@ export function createTeamClient({ name, spec, channel = process, onError = erro
             }
         }
     }
+    // Profiles can wait for coordination before dispatch. Only a real
+    // inbox reply wakes this coordination wait; player questions stay pending.
+    function resumeCoordination() {
+        if (!latestReply || latestReply.id === resumedReply || controller.status() !== 'waiting_user') return;
+        const job = controller.snapshot();
+        if (!job || job.teamRunId !== latestReply.runId || job.teamTask || job.teamCoordination ||
+            !job.result?.reason?.startsWith('【等队友】')) return;
+        try {
+            const resumed = controller.resume();
+            resumedReply = latestReply.id;
+            resumed.catch(onError);
+        } catch (error) {
+            // A reply may arrive while the waiting checkpoint is finishing.
+            if (error.message !== '当前任务仍在运行') throw error;
+        }
+    }
     async function tick() {
         if (!controller || ticking || closed) return;
         ticking = true;
@@ -63,8 +82,13 @@ export function createTeamClient({ name, spec, channel = process, onError = erro
             await flushResults();
             const messages = await send('inbox');
             const ack = [];
-            for (const message of messages) if (await controller.receiveTeamEvent(message)) ack.push(message.id);
+            for (const message of messages) {
+                if (!await controller.receiveTeamEvent(message)) continue;
+                ack.push(message.id);
+                if (name === entry && message.kind === 'message' && spec.agents[message.from]) latestReply = message;
+            }
             if (ack.length) await send('ack', { ids: ack });
+            resumeCoordination();
             if (!busy && controller.canAcceptTask()) {
                 const assignment = await send('take_task');
                 if (assignment) {
@@ -91,10 +115,11 @@ export function createTeamClient({ name, spec, channel = process, onError = erro
             const context = await send('context', scope(job));
             if (job.teamTask && context.currentTask) job.teamTask = context.currentTask;
             delete context.currentTask;
-            // 协商推选设计者后，蓝图可能由其他成员发布：把共享蓝图物化到本地
-            // job（仅当本地尚无更新版本时），entry 才能立即派单、设计者才能修订。
+            // Coordination can use the shared design origin and blueprint metadata.
+            // The full local assignment belongs to the construction job.
+            if (job.teamCoordination) job.assignment = null;
             if (context.sharedAssignment && context.blueprintVersion > (job.assignmentVersion ?? 0)) {
-                job.assignment = structuredClone(context.sharedAssignment);
+                if (!job.teamCoordination) job.assignment = structuredClone(context.sharedAssignment);
                 job.design = structuredClone(context.sharedDesign ?? null);
                 job.assignmentVersion = context.blueprintVersion;
             }

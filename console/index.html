@@ -96,22 +96,26 @@
       <div class="section-heading"><div><h2>你的协作小队</h2><p>一条连线，一份默契。让伙伴找到各自的位置。</p></div><div class="mini-stats"><span><strong id="memberCount">0</strong>伙伴</span><span><strong id="relationCount">0</strong>关系</span><span><strong id="activeTaskCount">0</strong>进行中</span></div></div>
       <div class="row" style="align-items:center; flex-wrap:wrap; margin-bottom:12px">
         <div style="flex:0 0 auto"><button class="primary" id="loadCentralizedExample">载入中心化示例</button></div>
-        <div class="muted">连接成员，用自然语言描述双方如何配合，再分别配置权限。Agent 据此协商、分工和交接；本版由入口发布共享蓝图并完成全局验收。</div>
+        <div class="muted">连接成员，用自然语言描述双方如何配合，再分别配置权限。Agent 据此协商、分工和交接；点击预设可载入角色、连线和职责。团队通信会记录在「启动与日志」，开启游戏内聊天后也可在 Minecraft 查看。</div>
       </div>
       <div class="row team-toolbar" style="align-items:flex-end">
         <div><label>新成员名</label><input id="newAgentName" placeholder="beta"></div>
         <div style="flex:0"><button class="primary" id="addAgentBtn">添加成员</button></div>
-        <div style="flex:2"><label>预设模板（空画布自动添加三位伙伴）</label>
-          <div style="display:flex; gap:8px">
-            <button class="primary" data-preset="centralized">中心化</button>
-            <button class="primary" data-preset="peers">平等协商</button>
-            <button class="primary" data-preset="hierarchy">层级协作</button>
-            <button class="primary" data-preset="review_revision">审查修订</button>
-            <button class="primary" data-preset="router">模型路由</button>
-            <button class="primary" data-preset="competitive">竞争择优</button>
-            <button class="primary" data-preset="voting">多数投票</button>
+        <div class="preset-picker"><label>协作范式</label>
+          <div class="preset-grid" role="group" aria-label="协作范式预设">
+            <button data-preset="pipeline" title="Pipeline">流水线</button>
+            <button data-preset="centralized" title="Manager–Worker">中心化</button>
+            <button data-preset="router" title="Router">模型路由</button>
+            <button data-preset="competitive" title="Competitive">竞争择优</button>
+            <button data-preset="parallel" title="Parallel">并行施工</button>
+            <button data-preset="voting" title="Voting">多数投票</button>
+            <button data-preset="peers" title="Debating">平等协商</button>
+            <button data-preset="handoff" title="Handoff">接力交接</button>
+            <button data-preset="blackboard" title="Blackboard">共享黑板</button>
+            <button data-preset="swarm" title="Swarm">群体协作</button>
           </div>
         </div>
+
       </div>
       <p class="team-actions"><button class="primary" id="startTeam">▶ 保存并开始新工程</button> <button id="resumeTeam">继续已有工程</button> <button class="danger" id="stopTeam" disabled>停止团队</button>
         <span id="teamStatus" class="muted">使用“控制”页的 LAN 端口；未单独配置 profile 的成员使用默认 profile。</span></p>
@@ -365,6 +369,11 @@ const RELATION_COLOR = '#91a580';
 const BUILTIN_ROLES = new Set(['lead', 'builder', 'inspector']);
 // 自定义角色按名字 hash 取 8 色板
 const ROLE_PALETTE = ['#8c70a5', '#488f83', '#a87b32', '#bb785a', '#698844', '#47889d', '#b86886', '#92973d'];
+const ROLE_LABELS = {
+  lead: '工程入口', builder: '施工成员', inspector: '检查员', router: '路由员',
+  candidate: '候选者', voter: '投票者', stage_builder: '阶段施工', module_builder: '独立施工',
+  starter: '首棒', receiver: '接棒', preparer: '基础准备', finisher: '后续施工', neighbor: '邻域施工'
+};
 const roleColor = role => role === 'lead' ? '#397a91' : role === 'inspector' ? '#688f42' : role === 'builder' ? '#8f7458'
   : ROLE_PALETTE[[...role].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % ROLE_PALETTE.length];
 
@@ -415,7 +424,7 @@ function markClean(message) {
 function renderLegend() {
   const roles = [...new Set(agentNames().map(name => graph.agents[name].role ?? 'builder'))];
   $('#canvasLegend').innerHTML =
-    roles.map(role => `<span><span class="dotc" style="background:${roleColor(role)}"></span>${role}</span>`).join('') +
+    roles.map(role => `<span><span class="dotc" style="background:${roleColor(role)}"></span>${ROLE_LABELS[role] ?? role}</span>`).join('') +
     '<span>— 自然语言关系</span>';
   $('#memberCount').textContent = agentNames().length;
   $('#relationCount').textContent = graph.edges.length;
@@ -451,7 +460,7 @@ function render() {
     svg.append(visual);
     const mid = document.createElementNS(ns, 'text');
     mid.setAttribute('x', (path.x1 + 2 * cx + path.x2) / 4); mid.setAttribute('y', (path.y1 + 2 * cy + path.y2) / 4 - 7);
-    mid.setAttribute('fill', stroke); mid.setAttribute('font-size', 11); mid.setAttribute('font-weight', 'bold');
+    mid.setAttribute('fill', '#4b6245'); mid.setAttribute('font-size', 11); mid.setAttribute('font-weight', 'bold');
     mid.setAttribute('font-family', 'Lucida Console, monospace'); mid.setAttribute('text-anchor', 'middle');
     mid.setAttribute('stroke', '#f0f5e9'); mid.setAttribute('stroke-width', '3'); mid.setAttribute('paint-order', 'stroke');
     const narrow = svg.getBoundingClientRect().width < 480;
@@ -512,7 +521,7 @@ function render() {
     }
     // MC 玩家名牌样式（半透明黑底白字）
     const tag = document.createElementNS(ns, 'rect');
-    const nameWidth = Math.max(56, name.length * 8 + 12);
+    const nameWidth = Math.max(56, name.length * 6.7 + 12);
     tag.setAttribute('x', agent.x - nameWidth / 2); tag.setAttribute('y', agent.y + half + 4);
     tag.setAttribute('width', nameWidth); tag.setAttribute('height', 17); tag.setAttribute('fill', 'rgba(0,0,0,.55)');
     group.append(tag);
@@ -520,14 +529,14 @@ function render() {
     label.setAttribute('x', agent.x); label.setAttribute('y', agent.y + half + 17);
     label.setAttribute('fill', '#fff'); label.setAttribute('font-size', 11); label.setAttribute('font-weight', 'bold');
     label.setAttribute('font-family', 'Lucida Console, monospace'); label.setAttribute('text-anchor', 'middle');
-    label.textContent = name.slice(0, 10);
+    label.textContent = name;
     group.append(label);
     // 角色副标签：运行时显示状态，静态显示角色名
     const roleText = document.createElementNS(ns, 'text');
     roleText.setAttribute('x', agent.x); roleText.setAttribute('y', agent.y + half + 33);
     roleText.setAttribute('fill', color); roleText.setAttribute('font-size', 10); roleText.setAttribute('font-weight', 'bold');
     roleText.setAttribute('font-family', 'Lucida Console, monospace'); roleText.setAttribute('text-anchor', 'middle');
-    roleText.textContent = runtimeAgents[name]?.status ?? role;
+    roleText.textContent = runtimeAgents[name]?.status ?? ROLE_LABELS[role] ?? role;
     group.append(roleText);
     const title = document.createElementNS(ns, 'title');
     title.textContent = agent.instructions || role + (agent.permissions ? '（自定义权限）' : '');
@@ -717,15 +726,6 @@ $('#edgeLabel').onchange = () => {
     render(); syncToEditor(); markDirty();
   }
 };
-function relationshipEdges(names, mode) {
-  const pairs = mode === 'hierarchy' ? names.slice(1).map((to, i) => [names[i], to]) :
-    names.flatMap((from, i) => names.slice(i + 1).map(to => [from, to]));
-  return pairs.map(([from, to]) => ({ from, to,
-    label: mode === 'hierarchy' || (mode === 'centralized' && from === names[0]) ? '分工与汇报' : '协商互助',
-    description: mode === 'peers' || (mode === 'centralized' && from !== names[0]) ?
-    `${from} 与 ${to} 平等协商，根据能力分担工作。需要帮助时说明范围，达成一致后登记任务或交接；避免重复施工。` :
-    `${from} 向 ${to} 分配目标和范围；${to} 在自己的权限和范围内执行，也可继续委托相连成员，汇总结果后向 ${from} 汇报。` }));
-}
 $('#convertRelationships').onclick = async () => {
   try {
     const { spec } = await api('/api/team/migrate', { method: 'POST', body: JSON.stringify({ spec: pendingLegacySpec }) });
@@ -807,128 +807,52 @@ $('#toggleJson').onclick = () => {
   const block = $('#jsonBlock');
   block.style.display = block.style.display === 'none' ? 'block' : 'none';
 };
-function defaultTeamSpec(mode = 'centralized') {
+const PRESET_POSITIONS = {
+  pipeline: [[0.5, 0.22], [0.16, 0.50], [0.5, 0.65], [0.84, 0.77]],
+  centralized: [[0.5, 0.23], [0.26, 0.72], [0.74, 0.72]],
+  router: [[0.5, 0.19], [0.5, 0.46], [0.24, 0.79], [0.76, 0.79]],
+  competitive: [[0.5, 0.24], [0.24, 0.72], [0.76, 0.72]],
+  parallel: [[0.5, 0.23], [0.24, 0.72], [0.76, 0.72]],
+  voting: [[0.5, 0.22], [0.18, 0.67], [0.5, 0.80], [0.82, 0.67]],
+  peers: [[0.5, 0.23], [0.24, 0.73], [0.76, 0.73]],
+  handoff: [[0.25, 0.23], [0.25, 0.60], [0.76, 0.74]],
+  blackboard: [[0.5, 0.22], [0.18, 0.55], [0.82, 0.55], [0.5, 0.81]],
+  swarm: [[0.5, 0.23], [0.16, 0.71], [0.5, 0.71], [0.84, 0.71]]
+};
+let presetRequest = 0;
+async function applyTeamPreset(button, reset = false) {
+  const mode = button.dataset.preset;
+  const title = button.textContent.trim();
+  if (agentNames().length && dirty && !reset &&
+      !confirm(title + '预设将替换当前画布草稿（含未保存的修改）。继续？')) return;
+  const before = JSON.stringify(graphToSpec());
+  const request = ++presetRequest;
+  const query = new URLSearchParams();
+  if ($('#profileSelect').value) query.set('profile', $('#profileSelect').value);
+  const { spec } = await api('/api/team/presets/' + mode + '?' + query);
+  if (request !== presetRequest) return;
+  if (JSON.stringify(graphToSpec()) !== before) {
+    return toast('画布已变动，请重新选择' + title + '预设');
+  }
   const rect = svg.getBoundingClientRect();
   const width = rect.width || 800, height = rect.height || 460;
-  const spec = {
-    coordination: 'relationships',
-    entryAgent: 'lead',
-    agents: {
-      lead: {
-        role: 'lead', position: { x: width / 2, y: height * 0.23 },
-        instructions: '你是团队中心，对整体目标和最终结果负责。观察场地、设计共享蓝图，根据实际支撑、通行、工作量、成员位置和进展自主分工：可以派不同模块，也可以给同一模块划定互不重叠的 scope 范围让成员一起建。不预设左右分区或必须同时开工；独立任务先全部派出，只有真实依赖才等待。允许 builder 交流并通过协作提案交接自己的局部工作。监督进度、调整阻塞任务，最后验收全部蓝图及空位并汇报。空间切分工具仅在适合时选用。'
-      },
-      builder_1: {
-        role: 'builder', position: { x: width * 0.28, y: height * 0.70 },
-        instructions: '你是施工成员，按共享蓝图和任务 scope 施工；同一模块可有其他成员参与。根据现场选择顺序，与队友交流支撑、分工、让路和协助。需要分担时 propose_task_share 提出自己的局部范围，队友 respond_task_share 接受后，由你在动作之间 commit_task_share 正式交接。只有收到运行时任务才开工。交接后原目标仍由你负责，等待协作者完成并验收完整原任务后 complete_task。遇到阻塞向 lead 报告，不能擅改蓝图。requirements 保持原文，进度写入步骤 evidence。'
-      },
-      builder_2: {
-        role: 'builder', position: { x: width * 0.72, y: height * 0.70 },
-        instructions: '你是施工成员，按共享蓝图和任务 scope 施工；同一模块可有其他成员参与。根据现场选择顺序，与队友交流支撑、分工、让路和协助。需要分担时 propose_task_share 提出自己的局部范围，队友 respond_task_share 接受后，由发起者在动作之间 commit_task_share 正式交接。空闲时可以回应提案或让路，接受提案后 end_turn，等待正式任务再施工。验收自己的任务并移到不挡路的位置后 complete_task。遇到阻塞向 lead 报告；不擅改蓝图或 requirements，进度写入步骤 evidence。'
-      }
-    },
-    edges: relationshipEdges(['lead', 'builder_1', 'builder_2'], mode)
-  };
-  if (mode !== 'centralized') {
-    spec.agents.lead.instructions = '你是工程入口，负责接收用户目标、发布共享蓝图和最终验收。根据关系说明与成员权限组织协作，通过正式任务登记范围和依赖；尊重成员的自主分工。';
-    for (const name of ['builder_1', 'builder_2']) spec.agents[name].instructions = '根据关系说明、自己的权限和任务范围协作。可以执行，也可以把自己的部分范围正式委托给相连成员；等待下级完成并验收原始范围后，向任务分配者汇报。遇到阻塞与相连成员沟通，不擅自修改蓝图或扩大权限。';
+  for (const [index, [name, agent]] of Object.entries(spec.agents).entries()) {
+    const [x, y] = PRESET_POSITIONS[mode][index];
+    const horizontalPadding = Math.max(38, name.length * 3.4 + 8);
+    agent.position = { x: Math.max(horizontalPadding, Math.min(width - horizontalPadding, width * x)), y: height * y };
   }
-  if (mode === 'peers') {
-    // 平等协商范式：没有 lead，全员可设计蓝图，设计者由协商推选；入口成员
-    // 只多 finishGate（最终验收锚点，entryAgent 校验要求），不是设计垄断。
-    spec.entryAgent = 'arch_1';
-    spec.agents = {
-      arch_1: { role: 'builder', position: spec.agents.lead.position,
-        permissions: { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true },
-        instructions: '你是平等协作组成员之一，也是对外接单入口：收到用户目标后，先用 broadcast 把目标和场地证据告诉全组，公开讨论分工与由谁设计蓝图。设计者由协商推选（谁合适谁设计，不必是你）；你可以自荐或支持他人，自己也具备设计蓝图的能力。蓝图发布后按协商分工施工，任何成员都可以提议任务和交接范围。所有子任务完成且全组核验通过后，由你做最终验收（entry 职责，不是指挥权）。' },
-      arch_2: { role: 'builder', position: spec.agents.builder_1.position,
-        permissions: { deny: [], blueprintAuthority: true },
-        instructions: '你是平等协作组成员。用 broadcast 或 send_message 与同伴讨论分工、推选蓝图设计者并表达意见；你同样具备设计蓝图的能力，被推选者用 design_blueprint 发布共享蓝图（发布者只负责设计，施工仍按协商分工）。按共享蓝图施工，可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' },
-      arch_3: { role: 'builder', position: spec.agents.builder_2.position,
-        permissions: { deny: [], blueprintAuthority: true },
-        instructions: '你是平等协作组成员。用 broadcast 或 send_message 与同伴讨论分工、推选蓝图设计者并表达意见；你同样具备设计蓝图的能力，被推选者用 design_blueprint 发布共享蓝图（发布者只负责设计，施工仍按协商分工）。按共享蓝图施工，可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' }
-    };
-    spec.edges = relationshipEdges(['arch_1', 'arch_2', 'arch_3'], mode);
-  }
-  return spec;
-}
-function applyTeamPreset(mode, reset = false) {
-  // 预设按钮的语义是"切换到该范式"：完整加载模板替换画布，而不是在旧画布上
-  // 只重连边（那样成员名/角色/instructions 全沿用上一个预设，看起来没反应）。
-  // 画布已有内容且带未保存修改时先确认，避免吞掉手工编辑。
-  if (agentNames().length && dirty && !reset &&
-      !confirm('画布上有未保存的修改。用新的预设替换当前草稿？')) return;
-  const spec = defaultTeamSpec(mode);
-  const title = { centralized: '中心化', peers: '平等协商', hierarchy: '层级协作' }[mode];
-  showPresetDraft(spec, title);
-}
-function showPresetDraft(spec, title) {
   drag = null; linkDraft = null; hoverName = null;
   specToGraph(spec);
   syncToEditor();
   select({ type: 'agent', name: spec.entryAgent });
   markDirty();
-  toast(`${title}预设已添加到画布：${agentNames().length} 位伙伴、${graph.edges.length} 条关系，可继续编辑并保存`);
+  toast(title + '预设已加入画布，可继续编辑并保存');
 }
-function applyReviewRevisionPreset() {
-  return applyFixedMemberPreset('review_revision', '审查修订', ['lead', 'builder', 'reviewer'],
-    [[0.26, 0.24], [0.74, 0.49], [0.26, 0.76]]);
-}
-function applyCompetitivePreset() {
-  return applyFixedMemberPreset('competitive', '竞争择优', ['lead', 'candidate_a', 'candidate_b'],
-    [[0.5, 0.24], [0.28, 0.73], [0.72, 0.73]]);
-}
-function applyVotingPreset() {
-  return applyFixedMemberPreset('voting', '多数投票', ['lead', 'voter_1', 'voter_2', 'voter_3'],
-    [[0.5, 0.22], [0.22, 0.63], [0.78, 0.63], [0.5, 0.81]]);
-}
-function applyFixedMemberPreset(mode, title, defaults, positions) {
-  // 与 applyTeamPreset 一致：预设切换 = 完整模板替换画布。旧逻辑在非空画布上
-  // 沿用现有成员名（useExisting），导致点第二个预设时画布几乎不变。
-  if (agentNames().length && dirty &&
-      !confirm(title + '预设将替换当前画布草稿（含未保存的修改）。继续？')) return;
-  return loadRolePreset(mode, title, graphToSpec(), [], false, index => positions[index]);
-}
-async function applyRouterPreset() {
-  // 同 applyFixedMemberPreset：完整模板替换，不复用旧画布成员名。
-  if (agentNames().length && dirty &&
-      !confirm('模型路由预设将替换当前画布草稿（含未保存的修改）。继续？')) return;
-  return loadRolePreset('router', '模型路由', graphToSpec(), [], false, (index, count) =>
-    index < 2 ? [0.5, index === 0 ? 0.2 : 0.45] : [(index - 1) / (count - 1), 0.77]);
-}
-async function loadRolePreset(mode, title, before, names, useExisting, positionFor) {
-  const query = new URLSearchParams();
-  for (const name of names) {
-    query.append('name', name);
-    if (mode === 'router' && before.agents[name]?.profile) query.set('profile.' + name, before.agents[name].profile);
-  }
-  if ($('#profileSelect').value) query.set('profile', $('#profileSelect').value);
-  const { spec } = await api('/api/team/presets/' + mode + '?' + query);
-  if (JSON.stringify(graphToSpec()) !== JSON.stringify(before)) {
-    return toast('画布已变动，请重新选择' + title + '预设');
-  }
-  const rect = svg.getBoundingClientRect();
-  const width = rect.width || 800, height = rect.height || 460;
-  const members = Object.entries(spec.agents);
-  for (const [index, [name, agent]] of members.entries()) {
-    const [x, y] = positionFor(index, members.length);
-    const previous = useExisting ? before.agents[name] : null;
-    if (previous?.profile) agent.profile = previous.profile;
-    agent.position = previous?.position ?? { x: width * x, y: height * y };
-  }
-  showPresetDraft(spec, title);
-}
-$('#loadCentralizedExample').onclick = () => applyTeamPreset('centralized', true);
-$$('[data-preset]').forEach(button => button.onclick = async () => {
-  try {
-    if (button.dataset.preset === 'review_revision') await applyReviewRevisionPreset();
-    else if (button.dataset.preset === 'router') await applyRouterPreset();
-    else if (button.dataset.preset === 'competitive') await applyCompetitivePreset();
-    else if (button.dataset.preset === 'voting') await applyVotingPreset();
-    else applyTeamPreset(button.dataset.preset);
-  }
-  catch (error) { toast(error.message); }
-});
+const presetButtons = $$('[data-preset]');
+const choosePreset = (button, reset) => applyTeamPreset(button, reset).catch(error => toast(error.message));
+for (const button of presetButtons) button.onclick = () => choosePreset(button);
+$('#loadCentralizedExample').onclick = () => choosePreset($('[data-preset=centralized]'), true);
+
 $('#applyCanvas').onclick = async () => {
   try {
     const spec = JSON.parse($('#teamEditor').value);

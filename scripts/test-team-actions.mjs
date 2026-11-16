@@ -16,10 +16,9 @@ parseAction('{"action":"tool","name":"query_claims","args":{}}');
 
 // Spec validation: presets pass, broken graphs fail with named errors.
 for (const [name, preset] of Object.entries(TEAM_PRESETS)) {
-    const names = name === 'voting' ? ['alpha', 'beta', 'gamma', 'delta'] : ['alpha', 'beta', 'gamma'];
-    assert.equal(validateTeamSpec(preset(names)).ok, true, name + ' 预设应有效');
+    assert.equal(validateTeamSpec(preset()).ok, true, name + ' 预设应有效');
 }
-assert.equal(validateTeamSpec(TEAM_PRESETS.hierarchy(['alpha', 'beta'])).ok, true);
+assert.equal(validateTeamSpec(TEAM_PRESETS.centralized(['alpha', 'beta'])).ok, true);
 {
     const disconnected = validateTeamSpec({ ...TEAM_PRESETS.centralized(['a', 'b', 'c']),
         edges: [{ from: 'a', to: 'b', description: '共同施工' }] });

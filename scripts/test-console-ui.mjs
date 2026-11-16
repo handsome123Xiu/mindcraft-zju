@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -13,8 +13,7 @@ import { TOOL_CATALOG } from '../src/building/tools.js';
 import { ACTION_SCHEMAS } from '../src/building/action-protocol.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const out = resolve(root, '.tmp-codex-relations');
-await mkdir(out, { recursive: true });
+const out = await mkdtemp(join(tmpdir(), 'mindcraft-ui-shots-'));
 const profile = await mkdtemp(join(tmpdir(), 'mindcraft-ui-browser-'));
 const browserBin = process.env.BROWSER_BIN ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 let saved = null;
@@ -103,45 +102,36 @@ try {
     await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1150, deviceScaleFactor: 1, mobile: false });
     await call('Page.navigate', { url });
     await until(() => evaluate("!!document.querySelector('#teamTasks tbody tr')"), 'Page failed to load');
-    for (const mode of ['voting', 'competitive', 'router', 'review_revision', 'hierarchy', 'peers', 'centralized']) {
+    const modes = ['pipeline', 'centralized', 'router', 'competitive', 'parallel',
+        'voting', 'peers', 'handoff', 'blackboard', 'swarm'];
+    assert.deepEqual(await evaluate("[...document.querySelectorAll('[data-preset]')].map(button => button.dataset.preset)"), modes);
+    const edgesByMode = { pipeline: 5, centralized: 3, router: 3, competitive: 2, parallel: 2,
+        voting: 3, peers: 3, handoff: 2, blackboard: 3, swarm: 5 };
+    for (const mode of [...modes.filter(mode => mode !== 'centralized'), 'centralized']) {
         saved = null;
         await call('Page.navigate', { url });
         await until(() => evaluate("!!document.querySelector('#teamTasks tbody tr')"), 'Empty canvas failed to load');
         assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), 0);
-        const memberCount = ['voting', 'router'].includes(mode) ? 4 : 3;
+        const template = TEAM_PRESETS[mode]();
+        const names = Object.keys(template.agents);
+        const memberCount = names.length;
         await click(`[data-preset=${mode}]`);
         await until(() => evaluate(`document.querySelectorAll('#teamCanvas g').length === ${memberCount}`), 'Preset did not populate the canvas');
         const preset = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
         assert(validateTeamSpec(preset).ok, `${mode} must create a valid team on an empty canvas`);
-        const names = {
-            voting: ['lead', 'voter_1', 'voter_2', 'voter_3'],
-            router: ['lead', 'router', 'builder_1', 'builder_2'],
-            review_revision: ['lead', 'builder', 'reviewer'],
-            competitive: ['lead', 'candidate_a', 'candidate_b'],
-            peers: ['arch_1', 'arch_2', 'arch_3']
-        }[mode] ?? ['lead', 'builder_1', 'builder_2'];
         assert.deepEqual(Object.keys(preset.agents), names);
-        if (mode === 'review_revision') assert.equal(preset.agents.reviewer.role, 'reviewer');
-        if (mode === 'router') assert.equal(preset.agents.router.role, 'router');
-        if (mode === 'peers') {
-            // 平等协商范式：全员 builder，入口仅以能力位区分（无 lead 头衔）。
-            assert(Object.values(preset.agents).every(agent => agent.role === 'builder'));
-            assert.equal(preset.entryAgent, 'arch_1');
-            assert.equal(preset.agents.arch_1.permissions?.blueprintAuthority, true);
-            assert.equal(preset.agents.arch_1.permissions?.finishGate, true);
-            assert(!JSON.stringify(preset.agents).includes('向 lead 报告'));
+        assert.deepEqual(preset.edges, template.edges, `${mode} has its own topology`);
+        assert.equal(preset.edges.length, edgesByMode[mode]);
+        for (const name of names) {
+            const { position, ...agent } = preset.agents[name];
+            assert.deepEqual(agent, template.agents[name], `${mode} copies the server profile of ${name}`);
+            assert(Number.isFinite(position.x) && Number.isFinite(position.y));
         }
-        if (mode === 'competitive') {
-            assert.equal(preset.agents.candidate_a.role, 'candidate');
-            assert(preset.edges.every(edge => edge.from === 'lead'));
+        assert(preset.edges.every(edge => edge.label && edge.description && !edge.kind && !edge.type));
+        if (['pipeline', 'parallel', 'handoff', 'blackboard', 'swarm'].includes(mode)) {
+            await evaluate("document.querySelector('#canvasWrap').scrollIntoView({block:'center'})");
+            await screenshot('preset-' + mode + '.png');
         }
-        if (mode === 'voting') {
-            assert(preset.edges.every(edge => edge.from === preset.entryAgent));
-            assert(preset.edges.every(edge => preset.agents[edge.to].role === 'voter'));
-        }
-        assert.equal(preset.edges.length, ['hierarchy', 'competitive'].includes(mode) ? 2 : 3);
-        assert(preset.edges.every(edge => edge.description && !edge.kind && !edge.type));
-        assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), memberCount);
         await click('#applyCanvas');
         await until(() => saved?.coordination === 'relationships', 'Preset was not saved');
         await call('Page.reload');
@@ -177,22 +167,36 @@ try {
     assert.equal(await evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.lead.permissions.blueprintAuthority"), true);
     assert.equal(original.role, 'lead');
     const configuredSpec = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
-    const configuredAgents = configuredSpec.agents;
     // 预设切换 = 完整模板替换画布（曾经的 useExisting 沿用旧成员，画布看起来没反应）。
-    await click('[data-preset=review_revision]');
-    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.reviewer?.role === 'reviewer'"), 'Review preset must replace the canvas with its own members');
+    await click('[data-preset=blackboard]');
+    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.finisher?.role === 'finisher'"), 'Blackboard must replace the canvas with its own members');
     await evaluate(`document.querySelector('#teamEditor').value = ${JSON.stringify(JSON.stringify(configuredSpec))}; document.querySelector('#teamEditor').onblur()`);
     await click('[data-preset=peers]');
     await until(() => evaluate("Object.keys(JSON.parse(document.querySelector('#teamEditor').value).agents).join() === 'arch_1,arch_2,arch_3'"), 'Peers preset must replace the canvas with arch members');
     await evaluate(`document.querySelector('#teamEditor').value = ${JSON.stringify(JSON.stringify(configuredSpec))}; document.querySelector('#teamEditor').onblur()`);
-    await click('[data-preset=hierarchy]');
-    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.lead?.role === 'lead'"), 'Hierarchy preset must replace the canvas with lead/builder members');
+    await click('[data-preset=parallel]');
+    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.builder_left?.role === 'module_builder'"), 'Parallel must replace the canvas with independent modules');
     const rewired = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
-    assert(rewired.edges.length === 2, 'hierarchy preset has two chained edges');
+    assert(rewired.edges.length === 2, 'parallel preset has two independent spokes');
     await click('[data-tab=control]'); await screenshot('console-control-desktop.png');
     await click('[data-tab=teamTab]');
     await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await click('#loadCentralizedExample');
+    for (const mode of modes) {
+        await click(`[data-preset=${mode}]`);
+        const names = Object.keys(TEAM_PRESETS[mode]().agents);
+        await until(async () => {
+            const loadedNames = await evaluate("Object.keys(JSON.parse(document.querySelector('#teamEditor').value).agents)");
+            return loadedNames.join(',') === names.join(',');
+        }, 'Mobile preset did not load: ' + mode);
+        const fits = await evaluate(`(() => {
+            const canvas = document.querySelector('#teamCanvas').getBoundingClientRect();
+            return [...document.querySelectorAll('#teamCanvas g')].every(node => {
+                const rect = node.getBoundingClientRect();
+                return rect.left >= canvas.left - 1 && rect.right <= canvas.right + 1 && rect.bottom <= canvas.bottom + 1;
+            });
+        })()`);
+        assert(fits, mode + ' nodes fit inside the mobile canvas');
+    }
     await screenshot('console-team-mobile.png');
     const mobile = await evaluate('({width:innerWidth,scroll:document.documentElement.scrollWidth})');
     assert(mobile.scroll <= mobile.width, 'Mobile horizontal overflow: ' + JSON.stringify(mobile));

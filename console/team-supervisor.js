@@ -5,6 +5,7 @@ import { join, resolve, relative, isAbsolute } from 'node:path';
 import { createTeamRuntime, entryAgent } from '../src/building/team-runtime.js';
 import { validateTeamSpec, capabilities } from '../src/building/team-state.js';
 import { BUILDING_MODEL_APIS } from '../src/building/model.js';
+import { createTeamTranscript } from './team-transcript.js';
 
 export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
     const children = new Map();
@@ -63,6 +64,11 @@ export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
                         edges: (value.edges ?? []).map(edge => JSON.stringify([[edge.from, edge.to].sort(), edge.description ?? '', edge.label ?? '', edge.note ?? ''])).sort() });
                     if (topology(previous.spec) !== topology(spec)) throw new Error('恢复旧工程需要原成员和连线；如需使用新结构，请选择“保存并开始新测试”');
                 }
+                const transcript = createTeamTranscript({ snapshot: () => runtime.snapshot(), log,
+                    notify: settings.chat_ingame ? (actor, text) => {
+                        const sender = children.get(actor)?.child;
+                        if (sender?.connected) sender.send({ type: 'team_transcript', text }, () => {});
+                    } : undefined });
                 for (const { name, file } of configs) {
                     const args = [join(root, 'main.js'), '--name', name, '--profile', file];
                     if (name === entry && previous) {
@@ -83,6 +89,10 @@ export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
                         try { response = { result: runtime.request(name, session, message.method, message.args) }; }
                         catch (error) { response = { error: error.message }; }
                         if (child.connected) child.send({ type: 'team_response', id: message.id, ...response }, error => { if (error) log(`[${name}] IPC: ${error.message}`); });
+                        if (!response.error) {
+                            try { transcript(name, message.method, message.args ?? {}, response.result); }
+                            catch (error) { log('[团队记录] ' + error.message); }
+                        }
                     });
                     for (const stream of [child.stdout, child.stderr]) if (stream) createInterface({ input: stream }).on('line', line => log(`[${name}] ${line}`));
                     const cleanup = () => {

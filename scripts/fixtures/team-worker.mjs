@@ -121,6 +121,9 @@ function decide(context) {
     if (context.plan.steps.some(step => step.status !== 'done')) return plan(true);
     return { action: 'complete_task', summary: 'Assigned parts verified' };
 }
+process.on('message', message => {
+    if (message?.type === 'team_transcript') console.log(JSON.stringify({ transcript: message }));
+});
 const client = createTeamClient({ name, spec: JSON.parse(process.env.MINDCRAFT_TEAM_SPEC) });
 const controller = createBuildingLoop({ world, model, team: client, peers: client.peers, agentName: name,
     sendMessage: async () => ({ status: 'sent' }), maxModelRequests: 40,

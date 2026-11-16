@@ -9,7 +9,7 @@ import { createMineflayerWorld } from './mineflayer-world.js';
 import { createBuildingLoop } from './loop-agent.js';
 import { parseBuildMessage } from './chat-input.js';
 import { formatTokenUsage } from './token-usage.js';
-import { createMessageSender } from './message-actions.js';
+import { createMessageSender, createTeamTranscriptViewer } from './message-actions.js';
 import { chooseMessageSite } from './chat-site.js';
 import { checkApiConnection } from './api-check.js';
 import { createTeamClient } from './team-client.js';
@@ -109,8 +109,7 @@ export async function startBuildingAgent() {
             });
             bot.once('end', unregister);
             bot.once('kicked', unregister);
-            // Agent 间协商消息镜像到游戏聊天框，玩家能直接看到 agent 之间的沟通。
-            // 私聊用 /msg、广播用公屏；镜像失败（掉线等）不影响真实投递。
+            // 独立启动的 Agent 保留原有游戏聊天镜像。
             const mirrorChat = (recipient, text) => {
                 if (bot._client?.state !== 'play' || !bot.entity) return;
                 const body = '[-> ' + recipient + '] ' + String(text ?? '').slice(0, 180);
@@ -175,20 +174,16 @@ export async function startBuildingAgent() {
                 if (!process.send) throw new Error('团队成员需要由控制台启动');
                 teamClient = createTeamClient({ name, spec: managedSpec });
                 team = teamClient;
-                // 团队模式下 peers 走 supervisor IPC；包装一层，消息同样镜像到游戏聊天框。
-                const directPeers = teamClient.peers;
-                peers = {
-                    isPeer: directPeers.isPeer,
-                    list: directPeers.list,
-                    async sendToAgent(recipient, text, job) {
-                        mirrorChat(recipient, text);
-                        return directPeers.sendToAgent(recipient, text, job);
-                    },
-                    async broadcast(text, job) {
-                        mirrorChat('(team)', text);
-                        return directPeers.broadcast(text, job);
-                    }
+                peers = teamClient.peers;
+                // The supervisor mirrors only accepted operations, with their actual sender and recipient.
+                const viewer = createTeamTranscriptViewer(bot);
+                const onTranscript = message => {
+                    if (message?.type === 'team_transcript') viewer.show(message.text);
                 };
+                process.on('message', onTranscript);
+                const removeTranscript = () => { process.off('message', onTranscript); viewer.close(); };
+                bot.once('end', removeTranscript);
+                process.once('disconnect', removeTranscript);
             }
             const options = {
                 world,

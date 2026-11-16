@@ -153,7 +153,7 @@ try {
         }
     });
     try {
-        await supervisor.start({ spec: spatial || scopedWork || cooperative ? TEAM_PRESETS.centralized(['lead', 'alpha', 'beta']) : spec, settings: { port: 25565, profiles: ['./profile.json'] } });
+        await supervisor.start({ spec: spatial || scopedWork || cooperative ? TEAM_PRESETS.centralized(['lead', 'alpha', 'beta']) : spec, settings: { port: 25565, profiles: ['./profile.json'], chat_ingame: scenario === 'normal' } });
         const deadline = Date.now() + 20000;
         let snapshot;
         do {
@@ -175,6 +175,21 @@ try {
         }
         assert.deepEqual(worldDb.prepare('SELECT DISTINCT agent FROM operations ORDER BY agent').all().map(r => r.agent), crashAgent ? ['beta'] : ['alpha', 'beta']);
         if (crashAgent) assert(snapshot.tasks.some(task => task.attempt === 2 && task.to === 'beta'));
+        if (scenario === 'normal') {
+            assert(logs.some(line => line.includes('[团队] lead [-> alpha] [派工') && line.includes('Build part 1')));
+            assert(logs.some(line => line.includes('[团队] alpha [-> lead] [领工')));
+            assert(logs.some(line => line.includes('[团队] alpha [-> lead] [完工')));
+            assert(logs.some(line => line.startsWith('[lead] {"transcript":') && line.includes('[-> alpha] [派工')));
+            assert(logs.some(line => line.startsWith('[alpha] {"transcript":') && line.includes('[-> lead] [完工')));
+            assert(!logs.some(line => line.startsWith('[lead] {"transcript":') && line.includes('[-> lead] [完工')),
+                'worker reports render from the worker, preserving the original speaker');
+        }
+        if (cooperative) {
+            for (const event of ['alpha [-> beta] [提议协作]', 'beta [-> alpha] [接受协作]', 'alpha [-> beta] [交接']) {
+                assert(logs.some(line => line.includes('[团队] ' + event)), 'missing team transcript: ' + event);
+            }
+            assert(!logs.some(line => line.includes('{"transcript":')), 'chat_ingame=false suppresses game previews only');
+        }
         const root = snapshot.runs[0];
         let saved;
         for (let attempt = 0; attempt < 50; attempt++) {
