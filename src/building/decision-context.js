@@ -15,7 +15,7 @@ Materials: list_materials searches obtainable registry items; gravity blocks pro
 Finish: all plan steps done, each requirement has satisfied review with evidence; fresh full world verification is mandatory. Blocked: report specific observed obstacle, not repeated guesses. A failed action changes no obligations. Correct the named error field before retrying.
 Coordinator: after dispatch, use wait_for_team while workers execute. Repeated list_tasks/inspect calls are not supervision progress. Lack of new coordinator facts is not worker failure; runtime will suspend repeated polling until task events arrive.`;
 
-const COORDINATION = new Set(['get_tool_help', 'send_message', 'list_peers', 'list_tasks', 'respond_task_share',
+const COORDINATION = new Set(['get_tool_help', 'send_message', 'broadcast', 'list_peers', 'list_tasks', 'respond_task_share',
     'observe_environment', 'observe_cells', 'inspect_block', 'look_at', 'move_to', 'fly_to', 'land_at']);
 const TEAM = new Set(['delegate_task', 'prepare_parallel_build', 'reassign_task', 'list_tasks',
     'propose_task_share', 'respond_task_share', 'commit_task_share']);
@@ -37,7 +37,9 @@ export function decisionInstructions(job, team, agentName) {
     const actionNames = job.teamCoordination ? ['tool', 'batch', 'end_turn', 'blocked'] :
         ['tool', 'batch', 'update_plan', 'blocked', 'wait_for_user',
             ...(!job.assignment && !job.demolition && !job.plan.steps.length ? ['end_turn'] : []),
-            ...(!job.teamTask && (!spec || actionAllowed(spec, team.self, 'design_blueprint').allowed) ? ['skill'] : []),
+            // 设计不绑身份：有 design_blueprint 权限且尚无发布蓝图的成员都可
+            // 提出/修订设计（peers 协商推选设计者；子任务成员仍被 tools.js 拦截）。
+            ...(!job.teamTask && !job.assignment && (!spec || actionAllowed(spec, team.self, 'design_blueprint').allowed) ? ['skill'] : []),
             ...(team?.runtime ? ['wait_for_team'] : []),
             ...(job.teamTask ? ['complete_task'] : ['finish'])];
     // Common tools are ready immediately. Less frequent tools are discovered

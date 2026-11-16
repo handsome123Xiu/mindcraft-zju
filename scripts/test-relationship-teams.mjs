@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { createTeamRuntime, edgeAllows } from '../src/building/team-runtime.js';
-import { validateTeamSpec, actionAllowed, TEAM_PRESETS } from '../src/building/team-state.js';
+import { validateTeamSpec, actionAllowed, capabilities, TEAM_PRESETS } from '../src/building/team-state.js';
 import { createTeamClient } from '../src/building/team-client.js';
 import { migrateTeamSpec } from '../src/building/team-migration.js';
 import { decisionInstructions } from '../src/building/decision-context.js';
@@ -39,8 +39,9 @@ function fixture(config = spec, path = ':memory:', publishInitially = true) {
     const sessions = Object.fromEntries(Object.keys(config.agents).map(name => [name, runtime.connect(name)]));
     const call = (name, method, args = {}) => runtime.request(name, sessions[name], method, args);
     for (const name of Object.keys(sessions)) call(name, 'heartbeat', { status: 'idle', canAcceptTask: true });
-    call('lead', 'open_run', { id: 'run', request: 'Build floor', owner: 'tester', origin: [0, 0, 0], dimension: 'overworld' });
-    if (publishInitially) call('lead', 'publish', { runId: 'run', previousVersion: 0, assignment });
+    const root = Object.keys(config.agents).includes('lead') ? 'lead' : Object.keys(config.agents)[0];
+    call(root, 'open_run', { id: 'run', request: 'Build floor', owner: 'tester', origin: [0, 0, 0], dimension: 'overworld' });
+    if (publishInitially) call(root, 'publish', { runId: 'run', previousVersion: 0, assignment });
     const finish = (name, task, total) => call(name, 'task_result', { ...scopeOf(task), status: 'completed', summary: '现场核验通过',
         evidence: [{ partId: 'part-1', total, remaining: 0 }] });
     return { runtime, sessions, call, finish };
@@ -389,6 +390,41 @@ for (const mode of ['centralized', 'peers', 'hierarchy']) {
     assert(migrated.edges[0].description.includes('分配工作') && migrated.edges[0].description.includes('沟通协作'));
     assert.equal(migrated.agents.worker.permissions, undefined, 'conversion does not silently grant permissions');
     assert(validateTeamSpec(migrated).ok);
+}
+
+// Peers 模式：设计者由协商推选。任何有蓝图权威的成员（含非 entry）都能
+// publish；entry 拿到别人发布的蓝图后立即可派单（context 同步共享蓝图）。
+{
+    const peers = TEAM_PRESETS.peers(['arch_1', 'arch_2', 'arch_3']);
+    assert(capabilities(peers, 'arch_2').blueprintAuthority, 'peer members can all design');
+    assert(capabilities(peers, 'arch_1').finishGate && !capabilities(peers, 'arch_2').finishGate, 'only the entry gates final acceptance');
+    const f = fixture(peers, ':memory:', false);
+    try {
+        // entry 先广播协商，推选 arch_2 设计
+        f.call('arch_1', 'message', { runId: 'run', recipient: 'arch_2', text: '场地平坦，请你设计蓝图。' });
+        const [talk] = f.call('arch_2', 'inbox');
+        assert.equal(talk.kind, 'message');
+        f.call('arch_2', 'ack', { ids: [talk.id] });
+        // 非权威成员（voting 的 voter 角色）仍被拒；arch_2 被推选后可以发布
+        assert.deepEqual(f.call('arch_2', 'publish', { runId: 'run', previousVersion: 0, assignment }), { assignmentVersion: 1 });
+        // entry 未自己发布，但 context 已同步共享蓝图，可立即派单
+        const entryContext = f.call('arch_1', 'context', { runId: 'run' });
+        assert.equal(entryContext.blueprintVersion, 1);
+        assert(entryContext.sharedAssignment, 'context materializes the peer-published blueprint');
+        const dispatch = f.call('arch_1', 'delegate', delegate('north', 'arch_2', [[0,0,0], [1,0,0]]));
+        assert(dispatch.taskId, 'entry dispatches against a blueprint another member published');
+        const worker = f.call('arch_2', 'take_task').task;
+        f.finish('arch_2', worker, 2);
+        assert.equal(f.call('arch_1', 'finish_run', { runId: 'run' }).status, 'completed');
+    } finally { f.runtime.close(); }
+}
+// 非权威成员发布仍被拒（voting preset 的 voter 无 blueprintAuthority）
+{
+    const voting = TEAM_PRESETS.voting();
+    const f = fixture(voting, ':memory:', false);
+    try {
+        assert.throws(() => f.call('voter_1', 'publish', { runId: 'run', previousVersion: 0, assignment }), /蓝图设计权限|design_blueprint/);
+    } finally { f.runtime.close(); }
 }
 
 console.log('Relationship teams passed: natural-language graph, explicit permissions, recursive delegation, scope fencing, dependencies, IPC/checkpoints, recovery, persistence, model context and canvas round trips.');

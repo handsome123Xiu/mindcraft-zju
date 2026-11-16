@@ -91,6 +91,15 @@ export function createTeamClient({ name, spec, channel = process, onError = erro
             const context = await send('context', scope(job));
             if (job.teamTask && context.currentTask) job.teamTask = context.currentTask;
             delete context.currentTask;
+            // 协商推选设计者后，蓝图可能由其他成员发布：把共享蓝图物化到本地
+            // job（仅当本地尚无更新版本时），entry 才能立即派单、设计者才能修订。
+            if (context.sharedAssignment && context.blueprintVersion > (job.assignmentVersion ?? 0)) {
+                job.assignment = structuredClone(context.sharedAssignment);
+                job.design = structuredClone(context.sharedDesign ?? null);
+                job.assignmentVersion = context.blueprintVersion;
+            }
+            delete context.sharedAssignment;
+            delete context.sharedDesign;
             job.teamContext = context;
         },
         publish: (job, assignment, design) => send('publish', { ...scope(job), previousVersion: job.assignmentVersion, assignment, design }),

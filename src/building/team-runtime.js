@@ -290,6 +290,11 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     requireRun();
                     return { tasks: Object.values(state.tasks).filter(t => t.runId === run.id).map(publicTask),
                         ...(name === run.root ? { allocation: allocation(state, run) } : {}),
+                        // 共享蓝图全量下发：entry 需要它派单（别人发布时 entry 本地
+                        // 还是 v0），设计者修订时也需要现版做 previousVersion。
+                        ...(run.assignment ? { blueprint: { version: run.blueprintVersion,
+                            bounds: run.assignment.blueprint.bounds, blocks: run.assignment.blueprint.blocks.length } } : {}),
+                        ...(run.assignment ? { sharedAssignment: run.assignment, sharedDesign: run.design } : {}),
                         proposals: Object.values(state.proposals).filter(p => p.runId === run.id).map(publicProposal),
                         currentTask: args.taskId ? requireTask() : null,
                         paused: run.paused ?? false, blueprintVersion: run.blueprintVersion, peers: Object.keys(run.spec.agents).map(peerState) };
@@ -305,7 +310,8 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'publish') {
                     requireRun();
-                    if (run.root !== name) throw new Error('只有工程协调者可以发布蓝图');
+                    // 设计者由团队协商推选：任何具备蓝图权威的成员都可发布，
+                    // 不硬绑 run.root（peers 模式全员有权威；层级模式只有 lead）。
                     if (!capabilities(run.spec, name).blueprintAuthority) throw new Error('缺少蓝图设计权限');
                     if (Object.values(state.tasks).some(t => t.runId === run.id && !terminal(t))) throw new Error('请先完成或取消现有子任务，再修订蓝图');
                     if (Object.values(state.claims).some(c => c.runId === run.id)) throw new Error('请先释放施工租约再修订蓝图');

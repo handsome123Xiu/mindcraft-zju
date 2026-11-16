@@ -114,7 +114,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
     // 团队权限门禁：没有 team spec 时一切照旧；有 spec 时按角色过滤，
     // 并对 world 变更类动作加租约检查。权限在每次调用时重读（支持重组队形）。
     const teamGate = toolName => {
-        if (job.teamCoordination && !['get_tool_help', 'send_message', 'list_peers', 'list_tasks', 'respond_task_share', 'observe_environment', 'observe_cells',
+        if (job.teamCoordination && !['get_tool_help', 'send_message', 'broadcast', 'list_peers', 'list_tasks', 'respond_task_share', 'observe_environment', 'observe_cells',
             'inspect_block', 'look_at', 'move_to', 'fly_to', 'land_at'].includes(toolName)) throw new Error('队友协调回合只允许观察、移动和回复');
         if (!team) return;
         const spec = team.spec();
@@ -290,8 +290,8 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             if (team?.runtime && job.teamTask) throw new Error('子任务共享已有蓝图，请向团队入口提出设计修改');
             if (name !== 'design_blueprint') throw new Error('未知 skill：' + name);
             if (team?.spec() && !roleOf(team.spec(), team.self).blueprintAuthority) {
-                throw new Error('团队模式下蓝图由 lead 统一设计并共享；' + roleOf(team.spec(), team.self).name +
-                    ' 角色不能调用 design_blueprint。请与 lead 协调蓝图变更');
+                throw new Error('缺少蓝图设计权限（blueprintAuthority）；' + roleOf(team.spec(), team.self).name +
+                    ' 角色不能调用 design_blueprint。请与团队推选的设计者协调蓝图变更');
             }
             teamGate(name);
             if (job.siteIssue) throw new Error('施工位置尚需确认：' + job.siteIssue);

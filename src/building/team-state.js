@@ -141,8 +141,8 @@ const PRESET_INSTRUCTIONS = {
         member: '你是施工成员，按共享蓝图和任务 scope 施工；同一模块可有其他成员参与。根据现场选择顺序，与队友交流支撑、分工、让路和协助。需要分担时 propose_task_share 提出自己的局部范围，队友 respond_task_share 接受后，由你在动作之间 commit_task_share 正式交接。只有收到运行时任务才开工。交接后原目标仍由你负责，等待协作者完成并验收完整原任务后 complete_task。遇到阻塞向 lead 报告，不能擅改蓝图。requirements 保持原文，进度写入步骤 evidence。'
     },
     peers: {
-        entry: '你是平等协作组成员之一，也是对外接单入口：收到用户目标后先与同伴公开讨论场地证据和分工方案，达成一致后把共享蓝图发布出来（只有你能执行最终发布与全队验收，这是职责分工不是指挥权）。任何成员都可以提议任务和交接范围，你也可以认领同伴提出的范围。',
-        member: '你是平等协作组成员。与同伴讨论并认领施工范围，按共享蓝图施工；可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。'
+        entry: '你是平等协作组成员之一，也是对外接单入口：收到用户目标后，先用 broadcast 把目标和场地证据告诉全组，公开讨论分工与由谁设计蓝图。设计者由协商推选（谁合适谁设计，不必是你）；你可以自荐或支持他人，自己也具备设计蓝图的能力。蓝图发布后按协商分工施工，任何成员都可以提议任务和交接范围。所有子任务完成且全组核验通过后，由你做最终验收（entry 职责，不是指挥权）。',
+        member: '你是平等协作组成员。用 broadcast 或 send_message 与同伴讨论分工、推选蓝图设计者并表达意见；你同样具备设计蓝图的能力，被推选者用 design_blueprint 发布共享蓝图（发布者只负责设计，施工仍按协商分工）。按共享蓝图施工，可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。'
     },
     hierarchy: {
         entry: '你是工程入口，负责接收用户目标、发布共享蓝图和最终验收。根据关系说明与成员权限组织协作，通过正式任务登记范围和依赖；尊重成员的自主分工。',
@@ -152,14 +152,17 @@ const PRESET_INSTRUCTIONS = {
 function preset(names, mode) {
     const pairs = mode === 'hierarchy' ? names.slice(1).map((to, i) => [names[i], to]) :
         names.flatMap((from, i) => names.slice(i + 1).map(to => [from, to]));
-    // peers 模式没有权力中心：所有成员同为 builder，仅在能力位上区分职责。
-    // 入口成员补 blueprintAuthority/finishGate，是"任务接单 + 蓝图发布 + 收尾
-    // 验收"的功能锚点（entryAgent 校验要求），不是指挥权。
+    // peers 模式没有权力中心：所有成员同为 builder 且都具备蓝图设计能力，
+    // 设计者由协商推选；入口成员多 finishGate（最终验收的功能锚点，
+    // entryAgent 校验要求），不是设计垄断也不是指挥权。
     const agents = mode === 'peers'
         ? Object.fromEntries(names.map((name, i) => [name, i === 0
             ? { role: 'builder', permissions: { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true },
                 instructions: PRESET_INSTRUCTIONS.peers.entry }
-            : { role: 'builder', instructions: PRESET_INSTRUCTIONS.peers.member }]))
+            // 内联 permissions 以 builder 表为底（deny 含 design_blueprint），
+            // 全员设计能力必须显式清空 deny。
+            : { role: 'builder', permissions: { deny: [], blueprintAuthority: true },
+                instructions: PRESET_INSTRUCTIONS.peers.member }]))
         : Object.fromEntries(names.map((name, i) => [name, i === 0
             ? { role: 'lead', instructions: PRESET_INSTRUCTIONS[mode].entry }
             : { role: 'builder', instructions: PRESET_INSTRUCTIONS[mode].member }]));

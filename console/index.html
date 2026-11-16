@@ -834,18 +834,19 @@ function defaultTeamSpec(mode = 'centralized') {
     for (const name of ['builder_1', 'builder_2']) spec.agents[name].instructions = '根据关系说明、自己的权限和任务范围协作。可以执行，也可以把自己的部分范围正式委托给相连成员；等待下级完成并验收原始范围后，向任务分配者汇报。遇到阻塞与相连成员沟通，不擅自修改蓝图或扩大权限。';
   }
   if (mode === 'peers') {
-    // 平等协商范式：没有 lead。入口成员只多两个功能能力位（蓝图发布、收尾
-    // 验收，entryAgent 校验要求），用内联 permissions 表达，头衔与提示均不
-    // 出现 lead/汇报类话术，协商语气由关系边描述承载。
+    // 平等协商范式：没有 lead，全员可设计蓝图，设计者由协商推选；入口成员
+    // 只多 finishGate（最终验收锚点，entryAgent 校验要求），不是设计垄断。
     spec.entryAgent = 'arch_1';
     spec.agents = {
       arch_1: { role: 'builder', position: spec.agents.lead.position,
         permissions: { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true },
-        instructions: '你是平等协作组成员之一，也是对外接单入口：收到用户目标后先与同伴公开讨论场地证据和分工方案，达成一致后把共享蓝图发布出来（只有你能执行最终发布与全队验收，这是职责分工不是指挥权）。任何成员都可以提议任务和交接范围，你也可以认领同伴提出的范围。' },
+        instructions: '你是平等协作组成员之一，也是对外接单入口：收到用户目标后，先用 broadcast 把目标和场地证据告诉全组，公开讨论分工与由谁设计蓝图。设计者由协商推选（谁合适谁设计，不必是你）；你可以自荐或支持他人，自己也具备设计蓝图的能力。蓝图发布后按协商分工施工，任何成员都可以提议任务和交接范围。所有子任务完成且全组核验通过后，由你做最终验收（entry 职责，不是指挥权）。' },
       arch_2: { role: 'builder', position: spec.agents.builder_1.position,
-        instructions: '你是平等协作组成员。与同伴讨论并认领施工范围，按共享蓝图施工；可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' },
+        permissions: { deny: [], blueprintAuthority: true },
+        instructions: '你是平等协作组成员。用 broadcast 或 send_message 与同伴讨论分工、推选蓝图设计者并表达意见；你同样具备设计蓝图的能力，被推选者用 design_blueprint 发布共享蓝图（发布者只负责设计，施工仍按协商分工）。按共享蓝图施工，可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' },
       arch_3: { role: 'builder', position: spec.agents.builder_2.position,
-        instructions: '你是平等协作组成员。与同伴讨论并认领施工范围，按共享蓝图施工；可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' }
+        permissions: { deny: [], blueprintAuthority: true },
+        instructions: '你是平等协作组成员。用 broadcast 或 send_message 与同伴讨论分工、推选蓝图设计者并表达意见；你同样具备设计蓝图的能力，被推选者用 design_blueprint 发布共享蓝图（发布者只负责设计，施工仍按协商分工）。按共享蓝图施工，可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。' }
     };
     spec.edges = relationshipEdges(['arch_1', 'arch_2', 'arch_3'], mode);
   }
