@@ -340,7 +340,7 @@ const TOOL_GROUPS = {
   拆除: ['set_demolition_target', 'dig_block', 'dig_row', 'dig_rectangle', 'dig_cube'],
   验收: ['inspect_part', 'inspect_build', 'get_build_checklist', 'inspect_blueprint'],
   通信: ['send_message', 'broadcast', 'list_peers'],
-  协作: ['delegate_task', 'prepare_parallel_build', 'reassign_task', 'list_tasks', 'propose_task_share', 'respond_task_share', 'commit_task_share'],
+  协作: ['delegate_site', 'delegate_task', 'prepare_parallel_build', 'reassign_task', 'list_tasks', 'propose_task_share', 'respond_task_share', 'commit_task_share'],
   认领: ['claim_part', 'release_part', 'query_claims'],
   查询: ['get_tool_help', 'list_materials']
 };
@@ -761,6 +761,7 @@ $('#addAgentBtn').onclick = () => {
 function graphToSpec() {
   return {
     coordination: 'relationships',
+    ...(graph.blueprintMode ? { blueprintMode: graph.blueprintMode } : {}),
     agents: Object.fromEntries(Object.entries(graph.agents).map(([name, a]) => [name, { role: a.role ?? 'builder',
       ...(a.profile ? { profile: a.profile } : {}), ...(a.instructions ? { instructions: a.instructions } : {}),
       ...(a.permissions ? { permissions: a.permissions } : {}), position: { x: a.x, y: a.y } }])),
@@ -781,7 +782,7 @@ function specToGraph(spec) {
   const rect = svg.getBoundingClientRect();
   const names = Object.keys(spec.agents);
   const perRow = Math.ceil(Math.sqrt(names.length));
-  graph = { coordination: 'relationships', entryAgent: spec.entryAgent,
+  graph = { coordination: 'relationships', entryAgent: spec.entryAgent, blueprintMode: spec.blueprintMode,
     edges: (spec.edges ?? []).map(({ from, to, description, label, note }) => ({ from, to, description, ...(label ? { label } : {}), ...(note ? { note } : {}) })),
     agents: Object.fromEntries(names.map((name, i) => [name, {
       profile: spec.agents[name].profile, instructions: spec.agents[name].instructions,
@@ -812,7 +813,7 @@ const PRESET_POSITIONS = {
   centralized: [[0.5, 0.23], [0.26, 0.72], [0.74, 0.72]],
   router: [[0.5, 0.19], [0.5, 0.46], [0.24, 0.79], [0.76, 0.79]],
   competitive: [[0.5, 0.24], [0.24, 0.72], [0.76, 0.72]],
-  parallel: [[0.5, 0.23], [0.24, 0.72], [0.76, 0.72]],
+  parallel: [[0.5, 0.23], [0.18, 0.72], [0.5, 0.72], [0.82, 0.72]],
   voting: [[0.5, 0.22], [0.18, 0.67], [0.5, 0.80], [0.82, 0.67]],
   peers: [[0.5, 0.23], [0.24, 0.73], [0.76, 0.73]],
   handoff: [[0.25, 0.23], [0.25, 0.60], [0.76, 0.74]],
@@ -901,13 +902,15 @@ async function refreshTeamRuntime() {
     $('#activeTaskCount').textContent = state.tasks.filter(t => t.status === 'running').length;
     $('#startTeam').disabled = state.running; $('#resumeTeam').disabled = state.running; $('#stopTeam').disabled = !state.running;
     $('#teamStatus').textContent = state.running ? state.agents.map(a => a.name + ': ' + a.status).join(' · ') : '团队未运行；端口使用“控制”页配置。';
+    const describeBounds = ({ min, max }) => '[' + min.join(',') + '] 至 [' + max.join(',') + ']';
     const describeScope = scope => !scope || scope.kind === 'whole-module' ? '完整模块' :
       scope.count === 0 ? '已交由协作者施工，等待验收' : `${scope.count} 格 · [${scope.bounds.min.join(',')}] 至 [${scope.bounds.max.join(',')}]`;
     const taskLabel = id => { const task = state.tasks.find(item => item.id === id); return task ? task.to + ' / ' + task.key : id; };
     const rows = state.tasks.map(task => {
       const tr = document.createElement('tr');
       const relations = [...task.dependsOn.map(id => '等待：' + taskLabel(id)), ...(task.parentId ? ['协作来源：' + taskLabel(task.parentId)] : [])].join('；') || '独立任务';
-      for (const value of [task.description, task.to, task.partIds.join(', ') + ' · ' + describeScope(task.workScope), relations, task.status, task.summary ?? task.reason ?? '']) {
+      const area = task.site ? '工地 ' + describeBounds(task.site.region) : task.partIds.join(', ') + ' · ' + describeScope(task.workScope);
+      for (const value of [task.description, task.to, area, relations, task.status, task.summary ?? task.reason ?? task.designSummary ?? '']) {
         const td = document.createElement('td'); td.textContent = value; tr.append(td);
       }
       return tr;

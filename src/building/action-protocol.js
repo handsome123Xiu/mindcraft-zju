@@ -18,6 +18,7 @@ const taskScope = object({ region, positions: { ...array(vector, 4096), minItems
 
 export const TOOL_SCHEMAS = Object.freeze({
     get_tool_help: object({ name: string }, ['name']),
+    delegate_site: object({ recipient: string, origin: vector, region }, ['recipient', 'origin', 'region']),
     prepare_parallel_build: object({ axis: { enum: ['auto', 'x', 'z'] } }),
     delegate_task: object({ key: string, recipient: string, partIds: { ...array(string, 512), minItems: 1 },
         description: string, success: string, dependsOn: array(string, 200), scope: taskScope, coordinateSpace }, ['key', 'recipient', 'partIds', 'description', 'success']),

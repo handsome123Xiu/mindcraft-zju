@@ -105,7 +105,7 @@ try {
     const modes = ['pipeline', 'centralized', 'router', 'competitive', 'parallel',
         'voting', 'peers', 'handoff', 'blackboard', 'swarm'];
     assert.deepEqual(await evaluate("[...document.querySelectorAll('[data-preset]')].map(button => button.dataset.preset)"), modes);
-    const edgesByMode = { pipeline: 5, centralized: 3, router: 3, competitive: 2, parallel: 2,
+    const edgesByMode = { pipeline: 5, centralized: 3, router: 3, competitive: 2, parallel: 3,
         voting: 3, peers: 3, handoff: 2, blackboard: 3, swarm: 5 };
     for (const mode of [...modes.filter(mode => mode !== 'centralized'), 'centralized']) {
         saved = null;
@@ -120,6 +120,7 @@ try {
         const preset = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
         assert(validateTeamSpec(preset).ok, `${mode} must create a valid team on an empty canvas`);
         assert.deepEqual(Object.keys(preset.agents), names);
+        assert.equal(preset.blueprintMode, template.blueprintMode);
         assert.deepEqual(preset.edges, template.edges, `${mode} has its own topology`);
         assert.equal(preset.edges.length, edgesByMode[mode]);
         for (const name of names) {
@@ -134,6 +135,7 @@ try {
         }
         await click('#applyCanvas');
         await until(() => saved?.coordination === 'relationships', 'Preset was not saved');
+        assert.equal(saved.blueprintMode, template.blueprintMode);
         await call('Page.reload');
         await until(() => evaluate(`document.querySelectorAll('#teamCanvas g').length === ${memberCount}`), 'Saved preset did not survive reload');
     }
@@ -175,9 +177,10 @@ try {
     await until(() => evaluate("Object.keys(JSON.parse(document.querySelector('#teamEditor').value).agents).join() === 'arch_1,arch_2,arch_3'"), 'Peers preset must replace the canvas with arch members');
     await evaluate(`document.querySelector('#teamEditor').value = ${JSON.stringify(JSON.stringify(configuredSpec))}; document.querySelector('#teamEditor').onblur()`);
     await click('[data-preset=parallel]');
-    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.builder_left?.role === 'module_builder'"), 'Parallel must replace the canvas with independent modules');
+    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.builder3?.role === 'module_builder'"), 'Parallel must replace the canvas with independent modules');
     const rewired = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
-    assert(rewired.edges.length === 2, 'parallel preset has two independent spokes');
+    assert(rewired.edges.length === 3, 'parallel preset has three independent spokes');
+    assert.deepEqual(Object.keys(rewired.agents), ['lead', 'builder1', 'builder2', 'builder3']);
     await click('[data-tab=control]'); await screenshot('console-control-desktop.png');
     await click('[data-tab=teamTab]');
     await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });

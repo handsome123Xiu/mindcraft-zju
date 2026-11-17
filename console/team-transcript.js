@@ -1,10 +1,14 @@
 // Summarize accepted team operations for the player, outside the agent's inbox.
-const observed = new Set(['message', 'publish', 'delegate', 'prepare_parallel', 'take_task', 'task_result',
+const observed = new Set(['message', 'publish', 'delegate', 'delegate_site', 'prepare_parallel', 'take_task', 'task_result',
     'reassign', 'propose_share', 'respond_share', 'commit_share', 'finish_run', 'cancel_run', 'fail_run']);
 const taskStatus = { completed: '完工', blocked: '阻塞', cancelled: '取消' };
 const short = id => id.slice(0, 8);
 
 function describeTask(task) {
+    if (task.site) {
+        const { min, max } = task.site.region;
+        return '#' + short(task.id) + ' 工地 [' + min.join(',') + '] 至 [' + max.join(',') + ']';
+    }
     const parts = task.partIds.join('、');
     const dependency = task.dependsOn.length ? '，等待 ' + task.dependsOn.map(short).join('、') + ' 完成' : '';
     const scope = task.scope?.count == null ? '' : '，' + task.scope.count + ' 格';
@@ -42,8 +46,11 @@ export function createTeamTranscript({ snapshot, log, notify }) {
                     edge.from === actor ? [edge.to] : edge.to === actor ? [edge.from] : []);
                 return address(recipients.join('、'), args.text);
             }
-            case 'publish':
-                return speak('[发布蓝图 v' + result.assignmentVersion + ']' + (args.design?.summary ? ' ' + args.design.summary : ''));
+            case 'publish': {
+                const summary = args.design?.summary ? ' ' + args.design.summary : '';
+                if (task?.site) return address(dispatcher, '[发布独立蓝图 v' + result.assignmentVersion + ']' + summary, 'site-blueprint:' + task.id);
+                return speak('[发布蓝图 v' + result.assignmentVersion + ']' + summary);
+            }
             case 'propose_share':
                 if (result.status === 'proposed') return address(proposal.to, '[提议协作] ' + proposal.description, 'proposal:' + proposal.id);
                 return;
@@ -60,9 +67,10 @@ export function createTeamTranscript({ snapshot, log, notify }) {
                 }
                 return;
             case 'delegate':
+            case 'delegate_site':
             case 'commit_share':
                 if (task) {
-                    const label = method === 'commit_share' ? '交接' : '派工';
+                    const label = { commit_share: '交接', delegate_site: '划定工地' }[method] ?? '派工';
                     return address(task.to, taskLine(label, task) + ' ' + task.description, 'delegate:' + task.id);
                 }
                 return;

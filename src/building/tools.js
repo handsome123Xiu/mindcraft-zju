@@ -8,11 +8,12 @@ import { scanEnvironment, scanCells } from './observation.js';
 import { rememberObservation, rememberBlockObservation, markObservationsStale } from './observation-memory.js';
 import { assertMaterial, placementNotes } from './materials.js';
 import { checklistParts, taskChecklistParts, refreshChecklist, inspectPart } from './checklist.js';
-import { partitionBuilding, verifyParallelSite } from './parallel-building.js';
+import { containsPosition, partitionBuilding, verifyParallelSite } from './parallel-building.js';
 
 export const TOOL_CATALOG = Object.freeze([
     { name: 'get_tool_help', description: 'Read exact arguments and usage for a named tool. Read-only; grants no additional permissions.' },
     { name: 'prepare_parallel_build', description: 'OPTIONAL coordinator tool for a site where X/Z strips make sense: split blueprint metadata into vertical zones and dispatch builders. Never automatic or mandatory. Usually prefer delegate_task with whole modules or chosen scope, preserving module identities. Requires no unfinished tasks/leases and clear independent supports. Final global verification stays with lead.' },
+    { name: 'delegate_site', description: 'Parallel entry only. Reserve one independent site per Builder using absolute world coordinates: recipient, origin (the first building layer), region.min and region.max. X/Z footprints cannot intersect. Each Builder receives the full user goal and designs and builds their own complete structure. Call once per Builder, then wait_for_team.' },
     { name: 'delegate_task', description: 'Assign a whole module or selected cells. Permitted task holders can delegate ONLY their current workScope to connected members; this atomically transfers writes, shrinks their local workScope, and creates a child task. Parent completion still verifies the original full scope. Optional scope={region:{min,max}} or {positions:[[x,y,z],...]}; omit for whole modules. coordinateSpace defaults to world; blueprint uses design.origin. Use disjoint scopes and a stable key for retries. Supply recipient, partIds, description, success; dependsOn uses returned task IDs, never ancestors or tasks waiting for you.' },
     { name: 'propose_task_share', description: 'Propose sharing part of your CURRENT workScope with a connected capable teammate. Supply stable key, recipient, partIds, explicit scope (region or positions), coordinateSpace, description and success. Does NOT transfer writes yet. Teammate must respond_task_share, then YOU commit_task_share between actions. Keep original goal; shared work remains part of your final responsibility.' },
     { name: 'respond_task_share', description: 'Accept or decline a proposal addressed to you using proposalId and accept. Inspect list_tasks proposals first. Acceptance does not start construction: finish this conversation with end_turn and wait for a runtime assignment. Do not accept work you cannot take.' },
@@ -270,6 +271,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
         inspectTask() {
             snapshot();
             if (!job.teamTask) throw new Error('当前不是委托任务');
+            if (job.teamTask.site && !job.assignment) throw new Error('须先发布自己的独立蓝图并完成施工');
             return job.teamTask.partIds.map(partId => {
                 const result = inspectPart(job, world, partId, { fullTask: true });
                 if (result.remaining) throw new Error('子任务部件尚未通过现场验收：' + partId);
@@ -287,7 +289,9 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
         refreshChecklist() { snapshot(); return refreshChecklist(job, world); },
         async useSkill(name, args, signal) {
             if (job.teamCoordination) throw new Error('队友协调回合不能设计或修改建筑');
-            if (team?.runtime && job.teamTask) throw new Error('子任务共享已有蓝图，请向团队入口提出设计修改');
+            const assignedSite = job.teamTask?.site;
+            if (team?.runtime && job.teamTask && !assignedSite) throw new Error('子任务共享已有蓝图，请向团队入口提出设计修改');
+            if (assignedSite && job.assignment) throw new Error('本工地已有发布的蓝图');
             if (name !== 'design_blueprint') throw new Error('未知 skill：' + name);
             if (team?.spec() && !roleOf(team.spec(), team.self).blueprintAuthority) {
                 throw new Error('缺少蓝图设计权限（blueprintAuthority）；' + roleOf(team.spec(), team.self).name +
@@ -304,6 +308,8 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             const preserve = completedCells();
             const proposed = await design({ request: args.brief == null ? job.request : requiredText(args.brief, '设计要求'),
                 origin, signal, runId: job.id, context: {
+                    ...(assignedSite ? { assignedSite: { ...assignedSite,
+                        constraint: 'Design the complete goal. Use this origin exactly. Every planned block and clearance cell must stay inside region (absolute world coordinates).' } } : {}),
                     originalGoal: job.request, requirements: job.plan.requirements, userClarifications: job.clarifications ?? [], supportedMaterials: supportedMaterials(),
                     constructionChecklist: refreshChecklist(job, world),
                     observation: job.observation ?? null, blockObservations: job.blockObservations ?? [],
@@ -322,6 +328,11 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             });
             const candidate = { version: 1, dimension: job.dimension, blueprint: proposed.blueprint,
                 planning: { source: 'skill', skill: name, model: job.model, request: job.request, origin } };
+            if (assignedSite && ![candidate.blueprint.bounds.min, candidate.blueprint.bounds.max].every(pos => containsPosition(assignedSite.region, pos))) {
+                throw Object.assign(new Error('蓝图及预留空位必须在自己的工地内，请缩小或调整形状'), {
+                    code: 'SITE_BOUNDS', field: 'shapes', expected: assignedSite
+                });
+            }
             const planned = new Map(prepareAssignment(candidate).targets.map(cell => [cell.pos.join(','), cell.block]));
             for (const cell of candidate.blueprint.blocks) {
                 nearSite(cell.pos);
@@ -366,13 +377,19 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             teamGate(name);
             if (name === 'get_tool_help') {
                 if (args.name === 'design_blueprint') return { status: 'observed', name: args.name,
-                    description: 'Plan first; reuse sufficient observations or block inspections, and choose additional reads only for missing or uncertain facts. No mandatory scan before each design. Origin may move at most 16 blocks from the task origin unless locked by the user. Design alone; publication checks all target and explicit air cells for conflicts. Builders cannot redesign. After success delegate independent tasks before waiting.',
+                    description: job.teamTask?.site
+                        ? 'Plan first. Design the complete structure at the assigned origin and keep all blocks and clearance within team.assignment.site.region. After publication, inspect_part, construct and verify.'
+                        : 'Plan first; reuse sufficient observations or block inspections, and choose additional reads only for missing or uncertain facts. No mandatory scan before each design. Origin may move at most 16 blocks from the task origin unless locked by the user. Design alone; publication checks all target and explicit air cells for conflicts. Builders cannot redesign. After success delegate independent tasks before waiting.',
                     parameters: ACTION_SCHEMAS.skill.properties.args };
                 const tool = TOOL_CATALOG.find(tool => tool.name === args.name);
                 if (!tool) throw new Error('未知工具；请从当前 TOOLS 中选择名称');
                 return { status: 'observed', name: tool.name, description: tool.description, parameters: tool.parameters };
             }
             if (name === 'prepare_parallel_build') return prepareParallel(args);
+            if (name === 'delegate_site') {
+                if (!team?.runtime) throw new Error('需要独立蓝图团队运行时');
+                return team.delegateSite(job, args);
+            }
             if (['propose_task_share', 'respond_task_share', 'commit_task_share'].includes(name)) {
                 if (!team?.runtime) throw new Error('需要团队运行时');
                 const method = { propose_task_share: 'proposeShare', respond_task_share: 'respondShare', commit_task_share: 'commitShare' }[name];

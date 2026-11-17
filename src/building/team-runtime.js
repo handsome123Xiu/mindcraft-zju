@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { openTeamStore } from './team-store.js';
 import { validateTeamSpec, capabilities, actionAllowed, edgeAllows } from './team-state.js';
 export { edgeAllows } from './team-state.js';
 import { checklistParts } from './checklist.js';
-import { coordinates } from './blueprint.js';
-import { partitionBuilding } from './parallel-building.js';
+import { bounds, coordinates } from './blueprint.js';
+import { partitionBuilding, independentBuilding, containsPosition, enclosingBounds } from './parallel-building.js';
 import { normalizeScope, scopedParts, taskScope, scopeSummary } from './task-scope.js';
 
 const initial = () => ({ runs: {}, tasks: {}, claims: {}, messages: [], proposals: {} });
@@ -59,17 +60,19 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
         (['blocked', 'queued'].includes(task.status) ? '请使用 reassign_task(taskId, recipient) 重派原任务，不要重复 delegate_task' : '请查看 list_tasks，不能重复委托已有范围');
     const partCache = new Map();
     const scopeCache = new Map();
-    const parts = run => {
-        const cacheKey = run.id + ':' + run.blueprintVersion;
-        if (!partCache.has(cacheKey)) partCache.set(cacheKey, checklistParts({ assignment: run.assignment, removed: {} })
+    const parts = (run, task) => {
+        const assignment = task?.site ? task.assignment : run.assignment;
+        if (!assignment) return [];
+        const cacheKey = task?.site ? run.id + ':' + task.id + ':' + task.blueprintVersion : run.id + ':' + run.blueprintVersion;
+        if (!partCache.has(cacheKey)) partCache.set(cacheKey, checklistParts({ assignment, removed: {} })
             .map(part => ({ ...part, keys: new Set(part.cells.map(cell => cell.pos.join(','))) })));
         return partCache.get(cacheKey);
     };
     let current, closed = false;
-    const key = (run, partId, taskId) => `${run.id}:${run.blueprintVersion}:${partId}${taskId ? ':task:' + taskId : ''}`;
+    const key = (run, partId, task) => `${run.id}:${task?.blueprintVersion ?? run.blueprintVersion}:${partId}${task ? ':task:' + task.id : ''}`;
     const taskParts = (run, task, full = false) => {
-        const cacheKey = `${task.id}:${run.blueprintVersion}:${task.scopeRevision ?? 0}:${full}`;
-        if (!scopeCache.has(cacheKey)) scopeCache.set(cacheKey, scopedParts(parts(run), task.partIds, taskScope(task, full))
+        const cacheKey = `${task.id}:${task.blueprintVersion}:${task.scopeRevision ?? 0}:${full}`;
+        if (!scopeCache.has(cacheKey)) scopeCache.set(cacheKey, scopedParts(parts(run, task), task.partIds, taskScope(task, full))
             .map(part => ({ ...part, keys: new Set(part.cells.map(cell => cell.pos.join(','))) })));
         return scopeCache.get(cacheKey);
     };
@@ -91,11 +94,15 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
     };
     const descendantOwns = (state, task, name) => Object.values(state.tasks).some(child =>
         child.parentId === task.id && !terminal(child) && (child.to === name || descendantOwns(state, child, name)));
-    const publicTask = ({ token, finishedToken, scope, workScope, signature, ...task }) => ({ ...task,
+    const taskForWorker = ({ assignment, design, ...task }) => task;
+    const publicTask = ({ token, finishedToken, scope, workScope, signature, assignment, design, ...task }) => ({ ...task,
+        ...(design?.summary ? { designSummary: design.summary } : {}),
         scope: scopeSummary(scope), workScope: scopeSummary(workScope ?? scope) });
+    const taskRun = (run, task) => task.site ? { ...run, origin: task.site.origin, assignment: task.assignment ?? null,
+        design: task.design ?? null, blueprintVersion: task.blueprintVersion } : run;
     const publicProposal = ({ scope, sourceToken, signature, ...proposal }) => ({ ...proposal, scope: scopeSummary(scope) });
     function allocation(state, run) {
-        if (!run.assignment) return [];
+        if (!run.assignment || run.spec.blueprintMode === 'independent') return [];
         const owned = new Set();
         for (const task of Object.values(state.tasks)) {
             if (task.runId !== run.id || task.blueprintVersion !== run.blueprintVersion || ['cancelled', 'superseded'].includes(task.status)) continue;
@@ -142,8 +149,8 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
     }
     function leaseTask(state, run, task, session) {
         task.session = session; task.leaseUntil = now() + leaseMs;
-        for (const part of taskParts(run, task)) state.claims[key(run, part.id, task.id)] = {
-            runId: run.id, blueprintVersion: run.blueprintVersion, partId: part.id, taskId: task.id,
+        for (const part of taskParts(run, task)) state.claims[key(run, part.id, task)] = {
+            runId: run.id, blueprintVersion: task.blueprintVersion, partId: part.id, taskId: task.id,
             owner: task.to, session, token: task.token, expiresAt: now() + leaseMs
         };
     }
@@ -151,7 +158,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
         for (const [id, claim] of Object.entries(state.claims)) if (claim.expiresAt <= now()) delete state.claims[id];
         for (const task of Object.values(state.tasks)) {
             if (task.status !== 'running') continue;
-            if (task.leaseUntil > now() && taskParts(state.runs[task.runId], task).every(part => state.claims[key(state.runs[task.runId], part.id, task.id)]?.token === task.token)) continue;
+            if (task.leaseUntil > now() && taskParts(state.runs[task.runId], task).every(part => state.claims[key(state.runs[task.runId], part.id, task)]?.token === task.token)) continue;
             releaseTask(state, task);
             task.status = 'queued';
             resetClaimWait(task);
@@ -159,7 +166,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
             report(state, task, 'task_requeued');
         }
         for (const task of Object.values(state.tasks)) {
-            if (task.status !== 'queued' || live.has(task.to)) continue;
+            if (task.status !== 'queued' || task.site || live.has(task.to)) continue;
             const run = state.runs[task.runId];
             if (run.status !== 'active' || run.paused) continue;
             const replacement = [...live.keys()].find(name => name !== run.root &&
@@ -200,7 +207,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
     function mutate(fn) {
         let changed;
         try { changed = store.transaction('runtime', initial(), state => { recover(state); return { state, result: fn(state) }; }); }
-        catch (error) { scopeCache.clear(); throw error; }
+        catch (error) { partCache.clear(); scopeCache.clear(); throw error; }
         const { state, result } = changed;
         current = state;
         onEvent();
@@ -256,11 +263,15 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
             const execute = readOnly ? fn => structuredClone(fn(current)) : mutate;
             return execute(state => {
                 const run = args.runId && state.runs[args.runId];
-                const permission = { delegate: 'delegate_task', prepare_parallel: 'prepare_parallel_build', reassign: 'reassign_task',
+                const permission = { delegate_site: 'delegate_site', delegate: 'delegate_task', prepare_parallel: 'prepare_parallel_build', reassign: 'reassign_task',
                     propose_share: 'propose_task_share', respond_share: 'respond_task_share', commit_share: 'commit_task_share',
                     publish: 'design_blueprint', claim: 'claim_part', release: 'release_part',
                     message: args.recipient ? 'send_message' : 'broadcast' }[method];
                 if (permission && !actionAllowed(run?.spec ?? spec, name, permission).allowed) throw new Error('权限不足：' + permission + '；请调整协作方案或由用户修改权限');
+                const independent = run?.spec.blueprintMode === 'independent';
+                if (independent && ['delegate', 'prepare_parallel', 'propose_share', 'respond_share', 'commit_share'].includes(method)) {
+                    throw new Error('独立蓝图工程通过 delegate_site 分配工地');
+                }
                 const requireRun = () => {
                     if (!run || !run.spec.agents[name] || run.status !== 'active') throw new Error('工程不存在或已结束');
                     return run;
@@ -269,7 +280,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     requireRun();
                     const task = state.tasks[args.taskId];
                     if (!task || task.runId !== run.id || task.to !== name || task.status !== 'running' ||
-                        task.token !== args.token || task.blueprintVersion !== run.blueprintVersion) throw new Error('任务或执行租约已失效');
+                        task.token !== args.token || (!task.site && task.blueprintVersion !== run.blueprintVersion)) throw new Error('任务或执行租约已失效');
                     return task;
                 };
                 if (method === 'heartbeat') {
@@ -288,16 +299,16 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'context') {
                     requireRun();
+                    const task = args.taskId ? requireTask() : null;
+                    const view = task?.site ? task : independent && name !== run.root ? {} : run;
                     return { tasks: Object.values(state.tasks).filter(t => t.runId === run.id).map(publicTask),
                         ...(name === run.root ? { allocation: allocation(state, run) } : {}),
-                        // 共享蓝图全量下发：entry 需要它派单（别人发布时 entry 本地
-                        // 还是 v0），设计者修订时也需要现版做 previousVersion。
-                        ...(run.assignment ? { blueprint: { version: run.blueprintVersion,
-                            bounds: run.assignment.blueprint.bounds, blocks: run.assignment.blueprint.blocks.length } } : {}),
-                        ...(run.assignment ? { sharedAssignment: run.assignment, sharedDesign: run.design } : {}),
+                        ...(view.assignment ? { blueprint: { version: view.blueprintVersion,
+                            bounds: view.assignment.blueprint.bounds, blocks: view.assignment.blueprint.blocks.length },
+                            sharedAssignment: view.assignment, sharedDesign: view.design } : {}),
                         proposals: Object.values(state.proposals).filter(p => p.runId === run.id).map(publicProposal),
-                        currentTask: args.taskId ? requireTask() : null,
-                        paused: run.paused ?? false, blueprintVersion: run.blueprintVersion, peers: Object.keys(run.spec.agents).map(peerState) };
+                        currentTask: task && taskForWorker(task),
+                        paused: run.paused ?? false, blueprintVersion: view.blueprintVersion ?? 0, peers: Object.keys(run.spec.agents).map(peerState) };
                 }
                 if (method === 'pause_run' || method === 'resume_run') {
                     requireRun(); if (run.root !== name) throw new Error('只有协调者可以暂停或恢复整个工程');
@@ -308,8 +319,64 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     }
                     return { status: paused ? 'paused' : 'active' };
                 }
+                if (method === 'delegate_site') {
+                    requireRun();
+                    if (!independent || name !== run.root) throw new Error('只有独立蓝图工程的入口可以分配工地');
+                    if (run.paused) throw new Error('团队工程已暂停');
+                    const to = args.recipient;
+                    if (!edgeAllows(run.spec, name, to)) throw new Error('执行者需要与入口直连');
+                    const region = bounds(args.region, '工地边界');
+                    const origin = coordinates(args.origin, '施工原点');
+                    if (!containsPosition(region, origin)) throw new Error('施工原点必须在工地内');
+                    const tasks = Object.values(state.tasks).filter(t => t.runId === run.id);
+                    const existing = tasks.find(task => task.to === to);
+                    if (existing) {
+                        if (!isDeepStrictEqual(existing.site, { origin, region })) throw new Error(to + ' 已经分配了工地');
+                        return { taskId: existing.id, recipient: to, site: existing.site, status: existing.status };
+                    }
+                    for (const task of tasks) {
+                        const other = task.site.region;
+                        if ([0, 2].every(i => region.min[i] <= other.max[i] && other.min[i] <= region.max[i])) {
+                            throw new Error('工地的水平投影与 ' + task.to + ' 重叠');
+                        }
+                    }
+                    if (Math.hypot(...run.origin.map((n, i) => Math.max(Math.abs(n - region.min[i]), Math.abs(n - region.max[i])))) > 256) {
+                        throw new Error('工地超出工程原点周围 256 格的范围');
+                    }
+                    bounds(enclosingBounds([...tasks.map(task => task.site.region), region]), '工地总范围');
+                    const task = { id: randomUUID(), runId: run.id, from: name, to, site: { origin, region },
+                        scope: { region }, partIds: [], dependsOn: [], blueprintVersion: 0, description: run.request,
+                        success: '在本工地独立交付符合原始要求的完整建筑，核验实体和预留空位',
+                        status: 'queued', attempt: 0, createdAt: now() };
+                    state.tasks[task.id] = task;
+                    return { taskId: task.id, recipient: to, site: task.site, status: task.status };
+                }
                 if (method === 'publish') {
                     requireRun();
+                    if (independent) {
+                        const task = requireTask();
+                        if (run.paused) throw new Error('团队工程已暂停');
+                        if (!capabilities(run.spec, name).blueprintAuthority) throw new Error('缺少独立蓝图设计权限');
+                        if (task.assignment) {
+                            if (args.previousVersion === 0 && isDeepStrictEqual(args.assignment, task.assignment) && isDeepStrictEqual(args.design, task.design)) {
+                                return { assignmentVersion: task.blueprintVersion, currentTask: taskForWorker(task) };
+                            }
+                            throw new Error('本工地已有发布的蓝图');
+                        }
+                        if (args.previousVersion !== 0) throw new Error('蓝图版本已变化');
+                        if (args.assignment?.dimension !== run.dimension || args.assignment.region != null) throw new Error('需要当前维度的完整蓝图');
+                        if (!isDeepStrictEqual(args.design?.origin, task.site.origin)) throw new Error('设计原点必须使用工地原点');
+                        const blueprintBounds = bounds(args.assignment.blueprint?.bounds, '蓝图边界');
+                        if (!containsPosition(task.site.region, blueprintBounds.min) || !containsPosition(task.site.region, blueprintBounds.max)) {
+                            throw new Error('蓝图及预留空位必须在自己的工地内');
+                        }
+                        task.partIds = checklistParts({ assignment: args.assignment }).map(part => part.id);
+                        task.assignment = args.assignment;
+                        task.design = args.design;
+                        task.blueprintVersion = 1;
+                        leaseTask(state, run, task, session);
+                        return { assignmentVersion: task.blueprintVersion, currentTask: taskForWorker(task) };
+                    }
                     // 设计者由团队协商推选：任何具备蓝图权威的成员都可发布，
                     // 不硬绑 run.root（peers 模式全员有权威；层级模式只有 lead）。
                     if (!capabilities(run.spec, name).blueprintAuthority) throw new Error('缺少蓝图设计权限');
@@ -488,16 +555,17 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     peer.canAcceptTask = false;
                     leaseTask(state, assignedRun, task, session);
                     report(state, task, 'task_started');
-                    return { task, run: assignedRun };
+                    return { task: taskForWorker(task), run: taskRun(assignedRun, task) };
                 }
                 if (method === 'claim') {
                     requireRun();
-                    if (args.blueprintVersion !== run.blueprintVersion || !parts(run).some(p => p.id === args.partId)) throw new Error('蓝图版本或部件无效');
-                    if (args.taskId) {
-                        const task = requireTask();
+                    const task = args.taskId ? requireTask() : null;
+                    if (args.blueprintVersion !== (task?.blueprintVersion ?? run.blueprintVersion) || !parts(run, task).some(p => p.id === args.partId)) throw new Error('蓝图版本或部件无效');
+                    if (task) {
                         if (!taskParts(run, task).some(p => p.id === args.partId)) throw new Error('部件不属于当前任务的自行施工范围');
-                        return { status: 'claimed', ...state.claims[key(run, args.partId, task.id)] };
-                    } else if (run.root !== name) throw new Error('请先接受施工委托');
+                        return { status: 'claimed', ...state.claims[key(run, args.partId, task)] };
+                    }
+                    if (independent || run.root !== name) throw new Error('请先接受施工委托');
                     const held = state.claims[key(run, args.partId)];
                     if (held && (held.owner !== name || held.taskId !== args.taskId)) return { status: 'conflict', owner: held.owner };
                     if (!args.taskId && Object.values(state.tasks).some(t => t.runId === run.id && !terminal(t) && taskParts(run, t).some(p => p.id === args.partId))) throw new Error('该部件已委托');
@@ -516,21 +584,20 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'claims') {
                     requireRun();
-                    const leases = Object.values(state.claims).filter(c => c.runId === run.id);
+                    const leases = Object.values(state.claims).filter(c => c.runId === run.id && (!independent || c.owner === name));
                     return { leases, claims: Object.fromEntries([...leases.filter(c => c.owner !== name), ...leases.filter(c => c.owner === name)].map(c => [c.partId, c])) };
                 }
                 if (method === 'assert_write') {
                     requireRun();
                     if (!capabilities(run.spec, name).canBuild) throw new Error('缺少施工权限');
                     if (run.paused) throw new Error('团队工程已暂停');
-                    if (args.blueprintVersion !== run.blueprintVersion) throw new Error('拒绝旧蓝图施工');
-                    if (args.taskId) {
-                        const task = requireTask();
-                        if (!task.partIds.includes(args.partId)) throw new Error('超出委托部件范围');
-                    }
-                    const held = state.claims[key(run, args.partId, args.taskId)];
+                    const task = args.taskId ? requireTask() : null;
+                    if (independent && !task?.assignment) throw new Error('请先发布本工地的独立蓝图');
+                    if (args.blueprintVersion !== (task?.blueprintVersion ?? run.blueprintVersion)) throw new Error('拒绝旧蓝图施工');
+                    if (task && !task.partIds.includes(args.partId)) throw new Error('超出委托部件范围');
+                    const held = state.claims[key(run, args.partId, task)];
                     if (!held || held.expiresAt <= now() || held.owner !== name || held.session !== session || (args.taskId && held.token !== args.token)) throw new Error('必须持有有效施工租约');
-                    const selected = (args.taskId ? taskParts(run, state.tasks[args.taskId]) : parts(run)).find(p => p.id === args.partId);
+                    const selected = (task ? taskParts(run, task) : parts(run)).find(p => p.id === args.partId);
                     if (!args.positions?.length || args.positions.some(pos => !selected?.keys.has(coordinates(pos, '施工坐标').join(',')))) throw new Error('施工坐标超出认领部件');
                     // Distinct runs can target the same physical world. Never allow
                     // their leases to authorize overlapping writes.
@@ -548,12 +615,23 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     if (previous?.runId === args.runId && previous.to === name && previous.finishedToken === args.token && previous.status === args.status) return { status: previous.status };
                     const task = requireTask();
                     if (!['completed', 'blocked', 'cancelled'].includes(args.status)) throw new Error('任务结果无效');
+                    if (args.status === 'completed' && task.site && (!task.assignment || args.blueprintVersion !== task.blueprintVersion)) {
+                        throw new Error('需使用本工地已发布的当前蓝图提交验收');
+                    }
                     if (args.status === 'completed' && Object.values(state.tasks).some(t => t.parentId === task.id && t.status !== 'completed')) throw new Error('协作子任务尚未完成，请等待或联系 lead 处理');
                     if (args.status === 'completed' && (args.evidence?.length !== task.partIds.length || task.partIds.some(id =>
                         !args.evidence.some(e => e.partId === id && e.remaining === 0 && e.total === taskParts(run, task, true).find(p => p.id === id)?.cells.length)))) throw new Error('缺少任务范围现场验收证据');
                     task.status = args.status; task.summary = text(args.summary, '任务结果'); task.evidence = args.evidence ?? [];
                     task.finishedToken = task.token;
                     releaseTask(state, task); report(state, task, 'task_result');
+                    if (task.site && task.status === 'completed') {
+                        const tasks = Object.values(state.tasks).filter(t => t.runId === run.id);
+                        if (tasks.length === Object.keys(run.spec.agents).length - 1 && tasks.every(t => t.status === 'completed')) {
+                            run.assignment = independentBuilding(run.dimension, tasks);
+                            run.design = { origin: run.origin, summary: '已完工的独立蓝图汇总' };
+                            run.blueprintVersion++;
+                        }
+                    }
                     return { status: task.status };
                 }
                 if (method === 'reassign') {
@@ -561,6 +639,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     if (!task || task.runId !== run.id || (dispatcher(state, task) !== name && run.root !== name) || !['blocked', 'queued'].includes(task.status)) throw new Error('只能重派阻塞或排队中的自己的委托');
                     if (!edgeAllows(run.spec, name, args.recipient) || !canWork(run.spec, args.recipient)) throw new Error('目标没有可用的协作连线或施工能力');
                     if (args.recipient === run.root) throw new Error('不能重派给正在等待它的工程入口');
+                    if (task.site && args.recipient !== task.to) throw new Error('独立工地只能由原执行者续建');
                     if (descendantOwns(state, task, args.recipient)) throw new Error('不能把上级任务重派给尚未完成下级任务的成员');
                     let parent = task.parentId && state.tasks[task.parentId];
                     while (parent) {
@@ -589,6 +668,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     requireRun(); if (run.root !== name) throw new Error('只有协调者可以结束工程');
                     if (method === 'finish_run' && !capabilities(run.spec, name).finishGate) throw new Error('缺少全局验收权限');
                     const tasks = Object.values(state.tasks).filter(t => t.runId === run.id);
+                    if (method === 'finish_run' && independent && !run.assignment) throw new Error('所有独立工地均须完工后才能整体验收');
                     if (method === 'finish_run' && tasks.some(t => !terminal(t))) throw new Error('仍有未完成子任务');
                     return endRun(state, run, status, method === 'fail_run' ? text(args.reason, '失败原因') : '');
                 }

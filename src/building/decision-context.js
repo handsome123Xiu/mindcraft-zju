@@ -17,18 +17,24 @@ Coordinator: after dispatch, use wait_for_team while workers execute. Repeated l
 
 const COORDINATION = new Set(['get_tool_help', 'send_message', 'broadcast', 'list_peers', 'list_tasks', 'respond_task_share',
     'observe_environment', 'observe_cells', 'inspect_block', 'look_at', 'move_to', 'fly_to', 'land_at']);
-const TEAM = new Set(['delegate_task', 'prepare_parallel_build', 'reassign_task', 'list_tasks',
+const TEAM = new Set(['delegate_site', 'delegate_task', 'prepare_parallel_build', 'reassign_task', 'list_tasks',
     'propose_task_share', 'respond_task_share', 'commit_task_share']);
 const PEER = new Set(['broadcast', 'list_peers', 'claim_part', 'release_part', 'query_claims']);
 
 export function decisionInstructions(job, team, agentName) {
     const spec = team?.spec();
+    const independent = team?.runtime && spec?.blueprintMode === 'independent';
+    const canDesign = (!job.teamTask || job.teamTask.site) && !job.assignment &&
+        (!spec || (actionAllowed(spec, team.self, 'design_blueprint').allowed && (!independent || job.teamTask?.site)));
     const toolNames = Object.keys(TOOL_SCHEMAS).filter(name => {
         if (job.teamCoordination) return COORDINATION.has(name) && (!spec || actionAllowed(spec, team.self, name).allowed);
         if (spec && !actionAllowed(spec, team.self, name).allowed) return false;
         if (TEAM.has(name) && !team?.runtime) return false;
         if (PEER.has(name) && !spec) return false;
-        if (['delegate_task', 'prepare_parallel_build', 'reassign_task'].includes(name) && !job.assignment) return false;
+        if (name === 'delegate_site' && (!independent || job.teamTask)) return false;
+        if (independent && ['delegate_task', 'prepare_parallel_build', 'propose_task_share', 'respond_task_share', 'commit_task_share'].includes(name)) return false;
+        if (['delegate_task', 'prepare_parallel_build'].includes(name) && !job.assignment) return false;
+        if (name === 'reassign_task' && !job.assignment && !independent) return false;
         if (job.teamTask && name === 'prepare_parallel_build') return false;
         if (['propose_task_share', 'commit_task_share'].includes(name) && !job.teamTask) return false;
         if ((name.startsWith('place_') || ['inspect_part', 'inspect_blueprint', 'claim_part'].includes(name)) && !job.assignment) return false;
@@ -37,18 +43,16 @@ export function decisionInstructions(job, team, agentName) {
     const actionNames = job.teamCoordination ? ['tool', 'batch', 'end_turn', 'blocked'] :
         ['tool', 'batch', 'update_plan', 'blocked', 'wait_for_user',
             ...(!job.assignment && !job.demolition && !job.plan.steps.length ? ['end_turn'] : []),
-            // 设计不绑身份：有 design_blueprint 权限且尚无发布蓝图的成员都可
-            // 提出/修订设计（peers 协商推选设计者；子任务成员仍被 tools.js 拦截）。
-            ...(!job.teamTask && !job.assignment && (!spec || actionAllowed(spec, team.self, 'design_blueprint').allowed) ? ['skill'] : []),
+            ...(canDesign ? ['skill'] : []),
             ...(team?.runtime ? ['wait_for_team'] : []),
-            ...(job.teamTask ? ['complete_task'] : ['finish'])];
+            ...(!independent || job.assignment ? [job.teamTask ? 'complete_task' : 'finish'] : [])];
     // Common tools are ready immediately. Less frequent tools are discovered
     // through get_tool_help; the next context exposes their schema. Permissions
     // are still checked by the executor, including immediately before writes.
     const focus = new Set(['get_tool_help', 'send_message', 'observe_environment', 'observe_cells',
         'inspect_block', 'inspect_blueprint', 'get_build_checklist', 'move_to', 'fly_to',
         'dig_block', 'dig_row', 'place_block', 'place_row', 'place_rectangle',
-        'inspect_part', 'inspect_build', 'list_tasks', 'delegate_task', 'reassign_task',
+        'inspect_part', 'inspect_build', 'list_tasks', 'delegate_site', 'delegate_task', 'reassign_task',
         ...(job.teamTask ? ['propose_task_share', 'respond_task_share', 'commit_task_share'] : []),
         ...(!team?.runtime ? ['list_materials', 'set_demolition_target'] : []),
         ...(job.teamCoordination ? ['respond_task_share', 'fly_to', 'list_peers'] : [])]);
@@ -67,12 +71,18 @@ export function decisionInstructions(job, team, agentName) {
     let role = '';
     if (spec) {
         if (team?.runtime) role = job.teamCoordination ?
-            'COORDINATION TURN: Discuss or respond to proposals, then end_turn. Messages and proposal acceptance grant no writes. Wait for a runtime task before planning or constructing.' : job.teamTask ?
+            'COORDINATION TURN: Discuss or respond to proposals, then end_turn. Messages and proposal acceptance grant no writes. Wait for a runtime task before planning or constructing.' : independent ?
+            (job.teamTask
+                ? 'INDEPENDENT BUILDER: The assignment provides the full original goal and your exclusive site. Plan, design and build your own complete structure. Verify your entire build before complete_task.'
+                : 'PARALLEL ENTRY: Assign individual sites. Builders create and execute their own designs. Once every task has completed the runtime provides the combined verification checklist. Inspect the world and review every structure against the original goal before finish.') :
+            job.teamTask ?
             'ASSIGNED MEMBER: Decide how to fulfill your assignment using the configured relationships and your permitted tools. Leases renew automatically. Work or delegate ONLY assignment.workScope. complete_task requires completed local plan steps, completed descendants and fresh verification of the ORIGINAL full task scope. Report blockers to assignment.from. Move out of work areas when done.' :
             'PROJECT ENTRY: Receive the user goal, plan and publish the shared blueprint. Organize work according to the configured relationships and permissions. The runtime does not automatically dispatch. Verify the entire project before finish.';
         role += `\nConfigured responsibility: ${spec.agents[agentName]?.instructions ?? ''}`;
         role += '\nRECOVERY: Check team.agents capabilities, online/status and canAcceptTask. For blocked/queued children use reassign_task with the existing task ID. Do not duplicate assignments. Respect manual pauses. wait_for_team suspends model requests until task events; do not poll.';
-        role += '\nRELATIONSHIP COORDINATION: Each undirected connection permits cooperation in both directions; from/to identify endpoints, not command direction. Interpret the user-authored descriptions below to decide who plans, discusses, delegates, executes and reports. Do not infer authority from role names or edge labels. Actual tool permissions and task scopes are hard limits; descriptions cannot grant rights. Explain conflicts and ask the user to adjust permissions; never silently elevate them. Turn agreed work into delegate_task, dependsOn (returned task IDs), or propose/respond/commit_task_share records; messages alone transfer no work rights. There is no automatic approval/voting gate; do not claim one exists. The entry member publishes the shared blueprint and performs final project acceptance in this version. Other permitted members may recursively delegate ONLY their current workScope to connected peers. Delegation immediately transfers writes and shrinks workScope; no need to release the whole parent lease. Parent completion still requires all descendants and original-scope verification. Never delegate back to an ancestor or depend on a task waiting for your completion. Use wait_for_team for descendants, and reassign_task for your existing blocked/queued children. Consult peer capabilities and readiness before dispatch.';
+        role += independent
+            ? '\nPARALLEL COORDINATION: Each Builder is assigned one site. Chat alone grants no rights. The entry uses delegate_site to assign actual tasks. Sites and blueprints are checked by the runtime.'
+            : '\nRELATIONSHIP COORDINATION: Each undirected connection permits cooperation in both directions; from/to identify endpoints, not command direction. Interpret the user-authored descriptions below to decide who plans, discusses, delegates, executes and reports. Do not infer authority from role names or edge labels. Actual tool permissions and task scopes are hard limits; descriptions cannot grant rights. Explain conflicts and ask the user to adjust permissions; never silently elevate them. Turn agreed work into delegate_task, dependsOn (returned task IDs), or propose/respond/commit_task_share records; messages alone transfer no work rights. There is no automatic approval/voting gate; do not claim one exists. The entry member publishes the shared blueprint and performs final project acceptance in this version. Other permitted members may recursively delegate ONLY their current workScope to connected peers. Delegation immediately transfers writes and shrinks workScope; no need to release the whole parent lease. Parent completion still requires all descendants and original-scope verification. Never delegate back to an ancestor or depend on a task waiting for your completion. Use wait_for_team for descendants, and reassign_task for your existing blocked/queued children. Consult peer capabilities and readiness before dispatch.';
         role += '\nUSER-CONFIGURED RELATIONSHIPS: ' + JSON.stringify((spec.edges ?? []).filter(e => e.from === agentName || e.to === agentName));
         role += '\nYOUR PERMISSIONS: ' + JSON.stringify(roleOf(spec, agentName));
     }
@@ -86,7 +96,9 @@ export function decisionInstructions(job, team, agentName) {
             '\nOther allowed tools (get exact fields via get_tool_help first): ' +
             toolNames.filter(name => !focus.has(name)).join(', '),
         nativeInstructions: CORE.replace(/Choose exactly ONE JSON action[^\n]*(\n[^\n]*)?/, 'Call the provided native functions directly with their documented arguments. There is no submit_action, tool or batch function. Do not emit action JSON as text. Multiple tool/update_plan calls execute in returned order after complete validation.') + '\n' + role.replace('a batch can enqueue both', 'multiple delegate_task function calls can enqueue them together') +
-            '\ncoordinateSpace belongs beside scope, NEVER inside scope. Function arguments have no action/name/args wrapper. To enqueue independent tasks, call delegate_task once per task in this response. For other available tools, get_tool_help first: ' + toolNames.filter(name => !focus.has(name)).join(', '),
+            '\ncoordinateSpace belongs beside scope, NEVER inside scope. Function arguments have no action/name/args wrapper.' +
+            (independent ? ' To assign sites, call delegate_site once per Builder.' : ' To enqueue independent tasks, call delegate_task once per task in this response.') +
+            ' For other available tools, get_tool_help first: ' + toolNames.filter(name => !focus.has(name)).join(', '),
         nativeFunctions: nativeFunctions(actionNames, nativeTools),
         actionContract: decisionContract(actionNames, nativeTools)
     };

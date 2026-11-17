@@ -76,3 +76,30 @@ export function verifyParallelSite(assignment, world) {
         }
     }
 }
+
+
+export function containsPosition(region, pos) {
+    return pos.every((n, i) => n >= region.min[i] && n <= region.max[i]);
+}
+
+export function enclosingBounds(regions) {
+    return {
+        min: [0, 1, 2].map(i => Math.min(...regions.map(region => region.min[i]))),
+        max: [0, 1, 2].map(i => Math.max(...regions.map(region => region.max[i])))
+    };
+}
+
+// The entry gets a read-only checklist once every independent build is complete.
+// Explicit clearance preserves empty areas inside designs without claiming the gaps between sites.
+export function independentBuilding(dimension, tasks) {
+    const blocks = [], clearance = [], parts = [], regions = [];
+    for (const task of tasks) {
+        const { expected, targets, region } = prepareAssignment(task.assignment);
+        for (const cell of targets) blocks.push(cell);
+        for (const cell of expected) if (cell.block === 'air') clearance.push(cell.pos);
+        parts.push({ id: 'part-' + (parts.length + 1), title: task.to + ' 的建筑',
+            positions: targets.map(cell => cell.pos) });
+        regions.push(region);
+    }
+    return { version: 1, dimension, blueprint: { version: 1, bounds: enclosingBounds(regions), blocks, clearance, parts } };
+}

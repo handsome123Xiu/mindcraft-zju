@@ -47,6 +47,10 @@ export function createDecisionRequest(job, world, budget, agentName = 'builder',
                 const view = { id: task.id, key: task.key, to: task.to, partIds: task.partIds, status: task.status,
                     attempt: task.attempt, dependsOn: task.dependsOn, ...(task.claimStalled ? { claimStalled: true } : {}),
                     ...(task.parentId ? { parentId: task.parentId } : {}), scope: scopeSummary(task.scope) };
+                if (task.site) {
+                    view.site = task.site;
+                    if (task.designSummary) view.designSummary = task.designSummary.slice(0, 100);
+                }
                 if (task.description) view.description = task.description.slice(0, 80) + (task.description.length > 80 ? '…' : '');
                 if (task.status === 'completed' && task.summary) view.summary = task.summary.slice(0, 100) + (task.summary.length > 100 ? '…' : '');
                 if (task.status !== 'completed' && task.reason) view.reason = task.reason.slice(0, 120) + (task.reason.length > 120 ? '…' : '');
@@ -57,7 +61,7 @@ export function createDecisionRequest(job, world, budget, agentName = 'builder',
                 job.checklist?.parts.some(item => item.id === part.partId && item.remaining > 0)) : undefined,
             proposals: job.teamContext?.proposals ?? [],
             assignment: job.teamTask ? { id: job.teamTask.id, partIds: job.teamTask.partIds, success: job.teamTask.success,
-                from: job.teamTask.from, teamGoal: job.teamGoal, scope: scopeSummary(job.teamTask.scope),
+                from: job.teamTask.from, teamGoal: job.teamGoal, ...(job.teamTask.site ? { site: job.teamTask.site } : {}), scope: scopeSummary(job.teamTask.scope),
                 workScope: scopeSummary(taskScope(job.teamTask)), parentId: job.teamTask.parentId,
                 helpers: job.teamContext?.tasks?.filter(task => task.parentId === job.teamTask.id) ?? [] } : null,
             agents: Object.entries(team.spec().agents).map(([agentName, entry]) => ({ name: agentName, role: entry.role,

@@ -51,7 +51,7 @@ export function actionAllowed(spec, agentName, toolName) {
 export function capabilities(spec, agentName) {
     const role = roleOf(spec, agentName);
     return { name: role.name, canBuild: actionAllowed(spec, agentName, 'place_block').allowed,
-        canDelegate: actionAllowed(spec, agentName, 'delegate_task').allowed,
+        canDelegate: actionAllowed(spec, agentName, spec?.blueprintMode === 'independent' ? 'delegate_site' : 'delegate_task').allowed,
         blueprintAuthority: role.blueprintAuthority === true, finishGate: role.finishGate === true };
 }
 
@@ -92,6 +92,7 @@ export function validateTeamSpec(spec) {
         if (entry?.position != null && (!Number.isFinite(entry.position.x) || !Number.isFinite(entry.position.y))) errors.push(name + ' 的画布坐标无效');
         if (entry?.instructions != null && (typeof entry.instructions !== 'string' || entry.instructions.length > 2000)) errors.push(name + ' 的职责说明无效');
     }
+    if (spec?.blueprintMode != null && spec.blueprintMode !== 'independent') errors.push('未知 blueprintMode');
     if (spec?.entryAgent && !names.includes(spec.entryAgent)) errors.push('团队入口必须是已有成员');
     if (!Array.isArray(spec?.edges ?? [])) return { ok: false, errors: [...errors, 'edges 必须是数组'] };
     for (const [index, edge] of (spec?.edges ?? []).entries()) {
@@ -126,7 +127,17 @@ export function validateTeamSpec(spec) {
     }
     if (names.length) {
         const entry = spec.entryAgent ?? names.find(name => spec.agents[name].role === 'lead') ?? names[0];
-        if (!capabilities(spec, entry).blueprintAuthority || !actionAllowed(spec, entry, 'design_blueprint').allowed) errors.push('本版团队入口需要蓝图设计权限');
+        if (spec.blueprintMode === 'independent') {
+            if (names.length < 2 || !actionAllowed(spec, entry, 'delegate_site').allowed) errors.push('独立蓝图模式需要派工入口和至少一名执行者');
+            for (const name of names.filter(name => name !== entry)) {
+                const caps = capabilities(spec, name);
+                if (!edgeAllows(spec, entry, name) || !caps.canBuild || !caps.blueprintAuthority || !actionAllowed(spec, name, 'design_blueprint').allowed) {
+                    errors.push(name + ' 需要与入口直连且具有独立设计和施工权限');
+                }
+            }
+        } else if (!capabilities(spec, entry).blueprintAuthority || !actionAllowed(spec, entry, 'design_blueprint').allowed) {
+            errors.push('本版团队入口需要蓝图设计权限');
+        }
         if (!capabilities(spec, entry).finishGate) errors.push('本版团队入口需要全局验收权限');
     }
     return { ok: !errors.length, errors };
@@ -161,13 +172,14 @@ const PRESET_INSTRUCTIONS = {
     },
     parallel: {
         entry: workers => [
-            '你负责在一份总蓝图上组织并行作业。为 ' + workers.join('、') + ' 各划一个独立模块或区段，核对目标格、支撑和施工动线互不依赖。若存在共用前置支撑，重新划出独立模块，或先完成共同准备再发这一批。',
-            '发布蓝图后，用 delegate_task 给每位 Builder 分配独立范围和验收标准，同批连续发出全部委托，留空 dependsOn，全部发出后再 wait_for_team。',
-            '一条分支受阻时让其他分支继续，定位被阻塞任务并处理。等每个模块都正式完成后，一次核验模块边界和整体要求并 finish。'
+            '你负责划分工地、派工和整体验收。先按原始任务做派工与验收计划，观察能支撑建筑的场地，为 ' + workers.join('、') + ' 分别划出可独立完成完整任务的工地。每块工地的水平投影互不重叠，并给支撑、开口和通行留下空间。若用户限制的位置容不下全部建筑，向用户确认。',
+            '用 delegate_site 给每名 Builder 登记一次绝对世界坐标 region 和施工 origin。origin 的 Y 是建筑第一层的位置。工地大小按用户要求估算。不要指定建筑形状、材质或内部做法，原始任务由工具原样交给每位 Builder。三项委托都登记后 wait_for_team。',
+            '一个工地受阻时让其他分支继续。用 list_tasks 检查并按需向原执行者 reassign_task。三份建筑完工后会收到汇总验收清单。调用 inspect_build 核对全部现场方块，逐座对照原始要求，检查工地位置与完成情况，再更新计划和验收记录并执行 finish。'
         ].join('\n'),
         member: lead => [
-            '你负责一条并行施工分支。收到正式任务即可核对现场后开工，只写自己的 workScope，保持其他模块入口畅通。',
-            '完成本区后现场验收，用 complete_task 向 ' + lead + ' 交付本模块的范围和证据。发现实际依赖别区时，向 ' + lead + ' 报告缺少的支撑、通路或坐标，由入口处理。'
+            '你的委托包含完整原始建筑任务及独立工地。读取 team.assignment.site 的世界坐标 region 和 origin，核对自己的地面支撑与空间，用 update_plan 制定本建筑的计划。你可以自行选择原始要求允许的造型、结构和材料，无需等 Lead 决定设计。',
+            '调用 design_blueprint 发布自己的蓝图。设计原点是委托的 origin，所有建筑方块与有意保留的空位都要落在本工地。发布后通过 inspect_part 和施工工具完成本建筑。与别的工地没有工序依赖。',
+            '验收自己整座建筑，标记计划完成，再用 complete_task 向 ' + lead + ' 提交建筑特征和现场证据。若发现边界或支撑条件无法满足原始要求，报告具体坐标和原因。'
         ].join('\n')
     },
     peers: {
@@ -348,14 +360,28 @@ function pipelinePreset(names = ['lead', 'builder1', 'builder2', 'builder3']) {
             stages[i] + ' 直接说明现场验收结果和续接条件，' + name + ' 在任务依赖满足后正式开工。'))
     ]);
 }
-function parallelPreset(names = ['lead', 'builder_left', 'builder_right']) {
-    requireMembers(names, 3, '并行');
+function parallelPreset(names = ['lead', 'builder1', 'builder2', 'builder3']) {
+    requireMembers(names, 4, '并行');
     const [lead, ...workers] = names;
     const instructions = PRESET_INSTRUCTIONS.parallel;
-    return teamSpec(lead, {
-        [lead]: coordinator(instructions.entry(workers)),
-        ...Object.fromEntries(workers.map(name => [name, scopedBuilder(instructions.member(lead), 'module_builder')]))
-    }, workers.map(name => relation(lead, name, '独立模块', name + ' 收到委托即可独立完成本区，' + lead + ' 等所有模块完成后统一验收。')));
+    const entry = coordinator(instructions.entry(workers));
+    entry.permissions.blueprintAuthority = false;
+    entry.permissions.allow = entry.permissions.allow.filter(name => !['design_blueprint', 'delegate_task'].includes(name));
+    entry.permissions.allow.push('delegate_site');
+    return {
+        ...teamSpec(lead, {
+            [lead]: entry,
+            ...Object.fromEntries(workers.map(name => [name, {
+                role: 'module_builder',
+                permissions: { blueprintAuthority: true, deny: [
+                    'delegate_site', 'delegate_task', 'prepare_parallel_build', 'reassign_task', ...NO_SHARE
+                ] },
+                instructions: instructions.member(lead)
+            }]))
+        }, workers.map(name => relation(lead, name, '工地委托与验收',
+            lead + ' 划定工地和基准点。' + name + ' 独立设计、施工并提交整座建筑，' + lead + ' 统一验收。'))),
+        blueprintMode: 'independent'
+    };
 }
 function handoffPreset(names = ['lead', 'builder_a', 'builder_b']) {
     requireMembers(names, 3, '接力交接');

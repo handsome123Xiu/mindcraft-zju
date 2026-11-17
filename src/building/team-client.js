@@ -127,7 +127,12 @@ export function createTeamClient({ name, spec, channel = process, onError = erro
             delete context.sharedDesign;
             job.teamContext = context;
         },
-        publish: (job, assignment, design) => send('publish', { ...scope(job), previousVersion: job.assignmentVersion, assignment, design }),
+        async publish(job, assignment, design) {
+            const { currentTask, ...result } = await send('publish', { ...scope(job), previousVersion: job.assignmentVersion, assignment, design });
+            if (currentTask) job.teamTask = currentTask;
+            return result;
+        },
+        delegateSite: (job, args) => send('delegate_site', { ...scope(job), ...args }),
         async delegate(job, args) {
             const { currentTask, ...result } = await send('delegate', { ...scope(job), ...args });
             if (currentTask) job.teamTask = currentTask;
