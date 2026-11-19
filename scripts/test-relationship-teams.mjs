@@ -241,154 +241,58 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     } finally { f.runtime.close(); }
 }
 
-// Router delegates its parent scope to the chosen workers without construction rights.
+// Router (independent mode) selects ONE builder via delegate_site; that builder
+// designs its own blueprint and builds; only the delegated site gates the finish.
 {
     const routing = TEAM_PRESETS.router();
-    routing.edges.find(edge => edge.to === 'builder_2').note = '模型档案：model-b（deepseek_responses）';
     assert(validateTeamSpec(routing).ok);
-    const team = { runtime: true, self: 'router', spec: () => routing };
-    const decision = decisionInstructions({ assignment, teamTask: { id: 'scope' }, events: [] }, team, 'router');
-    assert.match(decision.instructions, /model-b/);
-    assert(decision.nativeFunctions.some(fn => fn.name === 'delegate_task'));
-    assert(!decision.nativeFunctions.some(fn => fn.name === 'place_block' || fn.name === 'design_blueprint'));
-    for (const tool of ['move_to', 'fly_to', 'land_at']) {
-        assert(actionAllowed(routing, 'router', tool).allowed);
+    assert.equal(routing.entryAgent, 'router');
+    assert.equal(routing.blueprintMode, 'independent');
+    assert.deepEqual(Object.keys(routing.agents), ['router', 'builder_1', 'builder_2', 'builder_3', 'builder_4']);
+    // Router routes and inspects but never designs or builds.
+    assert(actionAllowed(routing, 'router', 'delegate_site').allowed);
+    assert(!actionAllowed(routing, 'router', 'design_blueprint').allowed);
+    assert(!actionAllowed(routing, 'router', 'place_block').allowed);
+    assert(capabilities(routing, 'router').finishGate);
+    // Each builder designs and builds its own site, but never routes.
+    for (const name of ['builder_1', 'builder_2', 'builder_3', 'builder_4']) {
+        assert(actionAllowed(routing, name, 'design_blueprint').allowed);
+        assert(capabilities(routing, name).canBuild);
+        assert(!actionAllowed(routing, name, 'delegate_site').allowed);
+        assert(!actionAllowed(routing, name, 'delegate_task').allowed);
     }
-    assert(decision.nativeFunctions.some(fn => fn.name === 'move_to'));
-    const coordination = decisionInstructions({ teamCoordination: true, events: [] }, team, 'router');
-    assert(coordination.nativeFunctions.some(fn => fn.name === 'move_to'));
-    assert(!coordination.nativeFunctions.some(fn => fn.name === 'place_block' || fn.name === 'dig_block'));
-    const f = fixture(routing);
+    // The router prompt surfaces each builder's specialty and the routing tool.
+    const team = { runtime: true, self: 'router', spec: () => routing };
+    const decision = decisionInstructions({ assignment, teamTask: null, events: [] }, team, 'router');
+    assert.match(decision.instructions, /石材与砖类/);
+    assert(decision.nativeFunctions.some(fn => fn.name === 'delegate_site'));
+    assert(!decision.nativeFunctions.some(fn => fn.name === 'design_blueprint' || fn.name === 'place_block' || fn.name === 'delegate_task'));
+
+    const f = fixture(routing, ':memory:', false);
     try {
-        assert.throws(() => f.call('lead', 'delegate', delegate('skip-router', 'builder_2')), /没有允许此委托的连线/);
-        f.call('lead', 'delegate', delegate('route', 'router'));
-        const parent = f.call('router', 'take_task').task;
-        assert.throws(() => f.call('router', 'assert_write', { ...scopeOf(parent), partId: 'part-1', positions: [[0, 0, 0]] }), /施工权限/);
-        f.call('router', 'delegate', delegate('left', 'builder_2', [[0,0,0], [1,0,0]], scopeOf(parent)));
-        f.call('router', 'delegate', delegate('right', 'builder_1', Array.from({ length: 6 }, (_, i) => [i + 2,0,0]), scopeOf(parent)));
-        assert.equal(f.call('router', 'context', scopeOf(parent)).currentTask.workScope.positions.length, 0);
-        assert.throws(() => f.finish('router', parent, 8), /子任务尚未完成/);
-        const left = f.call('builder_2', 'take_task').task;
-        const right = f.call('builder_1', 'take_task').task;
-        assert.equal(left.parentId, parent.id);
-        assert.equal(right.parentId, parent.id);
-        const message = '【让路】世界坐标 (0,0,0) 被挡住，请移到工地外。';
-        f.call('builder_1', 'message', { ...scopeOf(right), recipient: 'router', text: message });
-        const request = f.call('router', 'inbox').find(event => event.kind === 'message' && event.from === 'builder_1');
-        assert.equal(request.payload.text, message);
-
-        let position = [0, 0, 0];
-        const world = {
-            snapshot: () => ({ dimension: 'overworld', position }),
-            async moveTo(target) { position = target; return true; }
-        };
-        const job = { origin: [0, 0, 0], dimension: 'overworld', teamTask: parent };
-        const tools = createBuildingTools({ world, job, team });
-        const destination = [0, 0, 3];
-        const result = await tools.call('move_to', { position: destination });
-        assert.equal(result.status, 'moved');
-        assert.deepEqual(position, destination);
-        await assert.rejects(tools.call('place_block', { position: destination, block: 'stone' }), /不允许执行/);
-        f.finish('builder_2', left, 2);
-        f.finish('builder_1', right, 6);
-        f.finish('router', parent, 8);
-        assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
-    } finally { f.runtime.close(); }
-}
-
-// Lead yields through the permitted route; blocked parent and child retain their IDs.
-{
-    const routing = TEAM_PRESETS.router();
-    const f = fixture(routing);
-    try {
-        const send = (from, to, text) => f.call(from, 'message', { runId: 'run', recipient: to, text });
-        const received = (to, from, text) => f.call(to, 'inbox').some(
-            event => event.kind === 'message' && event.from === from && event.payload.text === text);
-        const block = (name, task) => f.call(name, 'task_result', {
-            ...scopeOf(task), status: 'blocked', summary: '施工格 (0,0,0) 被 Lead 占用'
-        });
-        const reassign = (from, recipient, taskId) => f.call(from, 'reassign', { runId: 'run', taskId, recipient });
-        const parentId = f.call('lead', 'delegate', delegate('route', 'router')).taskId;
-        let parent = f.call('router', 'take_task').task;
-        const childId = f.call('router', 'delegate', delegate('base', 'builder_1', undefined, scopeOf(parent))).taskId;
-        let child = f.call('builder_1', 'take_task').task;
-        const report = '【让路】任务 ' + childId + '，Lead 占用施工格 (0,0,0)';
-        assert.throws(() => send('builder_1', 'lead', report), /连线/);
-        send('builder_1', 'router', report);
-        assert(received('router', 'builder_1', report));
-        send('router', 'lead', report);
-        assert(received('lead', 'router', report));
-
-        block('builder_1', child);
-        block('router', parent);
-        let position = [0, 0, 0];
-        const tools = createBuildingTools({
-            world: {
-                snapshot: () => ({ dimension: 'overworld', position }),
-                async moveTo(target) { position = target; return true; }
-            },
-            job: { origin: [0, 0, 0], dimension: 'overworld' },
-            team: { runtime: true, self: 'lead', spec: () => routing }
-        });
-        const moved = await tools.call('move_to', { position: [0, 0, 3] });
-        assert.equal(moved.status, 'moved');
-        const clearance = '【已让路】原施工格 (0,0,0)，Lead 已到 (' + moved.position.join(',') + ')';
-        send('lead', 'router', clearance);
-        assert(received('router', 'lead', clearance));
-        assert.throws(() => reassign('lead', 'builder_1', childId), /连线/);
-
-        reassign('lead', 'router', parentId);
-        parent = f.call('router', 'take_task').task;
-        assert.equal(parent.id, parentId);
-        send('router', 'builder_1', clearance);
-        assert(received('builder_1', 'router', clearance));
-        reassign('router', 'builder_1', childId);
-        child = f.call('builder_1', 'take_task').task;
-        assert.equal(child.id, childId);
-        assert.equal(child.parentId, parentId);
-        f.finish('builder_1', child, 8);
-        f.finish('router', parent, 8);
-        assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
-    } finally { f.runtime.close(); }
-}
-
-
-
-// Routed upper layers cannot be claimed before their supporting subtask completes.
-{
-    const f = fixture(TEAM_PRESETS.router(), ':memory:', false);
-    try {
-        const pyramid = { ...assignment, blueprint: compileBlueprint({ shapes: [
-            { kind: 'point', part: 'base', at: [0,0,0], block: 'sandstone' },
-            { kind: 'point', part: 'middle', at: [0,1,0], block: 'sandstone' },
-            { kind: 'point', part: 'top', at: [0,2,0], block: 'sandstone' }
-        ] }, [0,0,0]) };
-        f.call('lead', 'publish', { runId: 'run', previousVersion: 0, assignment: pyramid });
-        const partIds = ['part-1', 'part-2', 'part-3'];
-        f.call('lead', 'delegate', delegate('pyramid', 'router', undefined, { partIds }));
-        const parent = f.call('router', 'take_task').task;
-        const dispatch = (key, recipient, partId, dependsOn) => f.call('router', 'delegate',
-            delegate(key, recipient, undefined, { ...scopeOf(parent), partIds: [partId], dependsOn }));
-        const settle = (name, task) => f.call(name, 'task_result', { ...scopeOf(task), status: 'completed',
-            summary: '验收通过', evidence: task.partIds.map(partId => ({ partId, total: 1, remaining: 0 })) });
-
-        const base = dispatch('base', 'builder_1', 'part-1', []);
-        const middle = dispatch('middle', 'builder_1', 'part-2', [base.taskId]);
-        const top = dispatch('top', 'builder_2', 'part-3', [middle.taskId]);
+        // The router chooses builder_3 and hands over the whole task as one site.
+        const { taskId } = f.call('router', 'delegate_site', { runId: 'run', recipient: 'builder_3',
+            origin: [0, 0, 0], region: { min: [0, 0, 0], max: [3, 0, 3] } });
+        assert(taskId);
+        // Unselected builders receive no task.
+        assert.equal(f.call('builder_1', 'take_task'), null);
         assert.equal(f.call('builder_2', 'take_task'), null);
-        const baseTask = f.call('builder_1', 'take_task').task;
-        assert.equal(baseTask.id, base.taskId);
-        settle('builder_1', baseTask);
-        assert.equal(f.call('builder_2', 'take_task'), null, 'the bottom layer alone does not release the top');
-        const middleTask = f.call('builder_1', 'take_task').task;
-        assert.equal(middleTask.id, middle.taskId);
-        settle('builder_1', middleTask);
-        const topTask = f.call('builder_2', 'take_task').task;
-        assert.equal(topTask.id, top.taskId);
-        assert.deepEqual(topTask.dependsOn, [middleTask.id]);
-        settle('builder_2', topTask);
-        settle('router', parent);
-        assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
+        assert.equal(f.call('builder_4', 'take_task'), null);
+        // Nothing built yet, so the finish gate is still closed.
+        assert.throws(() => f.call('router', 'finish_run', { runId: 'run' }), /所有独立工地/);
+
+        const task = f.call('builder_3', 'take_task').task;
+        // The chosen builder designs its own blueprint at the site origin.
+        f.call('builder_3', 'publish', { runId: 'run', taskId: task.id, token: task.token, previousVersion: 0,
+            design: { origin: [0, 0, 0], summary: '独立设计石质地板' },
+            assignment: { version: 1, dimension: 'overworld',
+                blueprint: compileBlueprint({ shapes: [
+                    { kind: 'box', part: 'floor', min: [0, 0, 0], max: [3, 0, 3], block: 'stone' }
+                ] }, [0, 0, 0]) } });
+        f.call('builder_3', 'task_result', { runId: 'run', taskId: task.id, token: task.token,
+            blueprintVersion: 1, status: 'completed', summary: '石质地板施工验收通过',
+            evidence: [{ partId: 'part-1', total: 16, remaining: 0 }] });
+        assert.equal(f.call('router', 'finish_run', { runId: 'run' }).status, 'completed');
     } finally { f.runtime.close(); }
 }
 
@@ -907,11 +811,11 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
 
 
 
-// Peers 模式：设计者由协商推选。任何有蓝图权威的成员（含非 entry）都能
+// Peers 模式：设计者由协商推选。任何有 design_blueprint 权限的成员（含非 entry）都能
 // publish；entry 拿到别人发布的蓝图后立即可派单（context 同步共享蓝图）。
 {
     const peers = TEAM_PRESETS.peers(['arch_1', 'arch_2', 'arch_3']);
-    assert(capabilities(peers, 'arch_2').blueprintAuthority, 'peer members can all design');
+    assert(actionAllowed(peers, 'arch_2', 'design_blueprint').allowed, 'peer members can all design');
     assert(capabilities(peers, 'arch_1').finishGate && !capabilities(peers, 'arch_2').finishGate, 'only the entry gates final acceptance');
     const f = fixture(peers, ':memory:', false);
     try {
@@ -933,7 +837,7 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
         assert.equal(f.call('arch_1', 'finish_run', { runId: 'run' }).status, 'completed');
     } finally { f.runtime.close(); }
 }
-// 非权威成员发布仍被拒（voting preset 的 voter 无 blueprintAuthority）
+// 非设计成员发布仍被拒（voting preset 的 voter 无 design_blueprint 权限）
 {
     const voting = TEAM_PRESETS.voting();
     const f = fixture(voting, ':memory:', false);

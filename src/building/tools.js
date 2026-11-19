@@ -241,7 +241,7 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
     }
 
     async function prepareParallel(args = {}) {
-        if (!team?.runtime || !roleOf(team.spec(), team.self).blueprintAuthority || job.teamTask) throw new Error('只有团队协调者可以准备并行施工');
+        if (!team?.runtime || !roleOf(team.spec(), team.self).finishGate || job.teamTask) throw new Error('只有团队协调者可以准备并行施工');
         const spec = team.spec();
         const workers = Object.keys(spec.agents).filter(name => name !== team.self && capabilities(spec, name).canBuild &&
             edgeAllows(spec, team.self, name));
@@ -293,8 +293,8 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             if (team?.runtime && job.teamTask && !assignedSite) throw new Error('子任务共享已有蓝图，请向团队入口提出设计修改');
             if (assignedSite && job.assignment) throw new Error('本工地已有发布的蓝图');
             if (name !== 'design_blueprint') throw new Error('未知 skill：' + name);
-            if (team?.spec() && !roleOf(team.spec(), team.self).blueprintAuthority) {
-                throw new Error('缺少蓝图设计权限（blueprintAuthority）；' + roleOf(team.spec(), team.self).name +
+            if (team?.spec() && !actionAllowed(team.spec(), team.self, 'design_blueprint').allowed) {
+                throw new Error('缺少蓝图设计权限；' + roleOf(team.spec(), team.self).name +
                     ' 角色不能调用 design_blueprint。请与团队推选的设计者协调蓝图变更');
             }
             teamGate(name);

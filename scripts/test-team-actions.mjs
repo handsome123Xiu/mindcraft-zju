@@ -192,14 +192,14 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
     const { validateTeamSpec, capabilities, roleOf } = await import('../src/building/team-state.js');
     // 合法自定义 spec：军师（只读白名单）+ 全权 chief + builder，kind 边带标签。
     const custom = { coordination: 'relationships', agents: {
-        chief: { role: 'chief', permissions: { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true } },
+        chief: { role: 'chief', permissions: { allow: ['*'], deny: [], finishGate: true } },
         advisor: { role: 'advisor', permissions: { allow: ['observe_environment', 'send_message'], whitelistOnly: true } },
         w1: { role: 'builder' } },
         edges: [{ from: 'chief', to: 'w1', description: 'chief 分配工作，w1 执行并汇报', label: '师徒' },
             { from: 'chief', to: 'advisor', description: 'chief 向 advisor 咨询意见', label: '问策' }], entryAgent: 'chief' };
     const ok = validateTeamSpec(custom);
     assert(ok.ok, '合法自定义 spec 通过：' + ok.errors.join(';'));
-    assert.deepEqual(capabilities(custom, 'chief'), { name: 'chief', canBuild: true, canDelegate: true, blueprintAuthority: true, finishGate: true });
+    assert.deepEqual(capabilities(custom, 'chief'), { name: 'chief', canBuild: true, canDelegate: true, finishGate: true });
     assert.equal(capabilities(custom, 'advisor').canBuild, false, '白名单军师无施工权');
     assert.equal(roleOf(custom, 'advisor').allow.includes('design_blueprint'), false, '白名单不隐含设计权');
     assert.equal(roleOf(custom, 'chief').name, 'chief', '自定义角色名保留');

@@ -7,16 +7,14 @@ import { TOOL_SCHEMAS } from './action-protocol.js';
 
 export const ROLE_PERMISSIONS = Object.freeze({
     lead: {
-        // 蓝图权威：设计、派单、全局验收；也可以下场施工。
+        // 设计、派单、全局验收；也可以下场施工。
         allow: ['*'],
         deny: [],
-        blueprintAuthority: true,
         finishGate: true
     },
     builder: {
         allow: ['*'],
         deny: ['design_blueprint'],
-        blueprintAuthority: false,
         finishGate: false
     },
     inspector: {
@@ -26,7 +24,6 @@ export const ROLE_PERMISSIONS = Object.freeze({
             'move_to', 'fly_to', 'land_at'],
         deny: [],
         whitelistOnly: true,
-        blueprintAuthority: false,
         finishGate: false
     }
 });
@@ -34,7 +31,11 @@ export const ROLE_PERMISSIONS = Object.freeze({
 export function roleOf(spec, agentName) {
     const entry = spec?.agents?.[agentName];
     // 自定义角色：内联 permissions 优先于内置角色表。名字自由，权限锚定能力。
-    if (entry?.permissions) return { name: entry.role ?? 'custom', ...ROLE_PERMISSIONS.builder, ...entry.permissions };
+    if (entry?.permissions) {
+        const permissions = { ...entry.permissions };
+        delete permissions.blueprintAuthority; // 旧配置遗留位：蓝图能力以 design_blueprint 工具权限为准
+        return { name: entry.role ?? 'custom', ...ROLE_PERMISSIONS.builder, ...permissions };
+    }
     const role = entry?.role;
     return { name: role ?? 'builder', ...(ROLE_PERMISSIONS[role] ?? ROLE_PERMISSIONS.builder) };
 }
@@ -52,7 +53,7 @@ export function capabilities(spec, agentName) {
     const role = roleOf(spec, agentName);
     return { name: role.name, canBuild: actionAllowed(spec, agentName, 'place_block').allowed,
         canDelegate: actionAllowed(spec, agentName, spec?.blueprintMode === 'independent' ? 'delegate_site' : 'delegate_task').allowed,
-        blueprintAuthority: role.blueprintAuthority === true, finishGate: role.finishGate === true };
+        finishGate: role.finishGate === true };
 }
 
 // Relationship descriptions guide the model; they never grant permissions.
@@ -74,7 +75,7 @@ export function validateTeamSpec(spec) {
         // 角色名自由：内置表内的名字直接用；表外必须带内联 permissions。
         if (entry?.role != null) {
             if (typeof entry.role !== 'string' || !/^[a-z0-9_-]{1,20}$/.test(entry.role)) errors.push(name + ' 的角色名无效（小写字母/数字/-/_，≤20 字符）');
-            else if (!Object.hasOwn(ROLE_PERMISSIONS, entry.role) && entry.permissions == null) errors.push(name + ' 使用自定义角色 ' + entry.role + '，必须提供 permissions（allow/deny/whitelistOnly/blueprintAuthority/finishGate）');
+            else if (!Object.hasOwn(ROLE_PERMISSIONS, entry.role) && entry.permissions == null) errors.push(name + ' 使用自定义角色 ' + entry.role + '，必须提供 permissions（allow/deny/whitelistOnly/finishGate）');
         }
         if (entry?.permissions != null) {
             const p = entry.permissions;
@@ -85,7 +86,7 @@ export function validateTeamSpec(spec) {
                     errors.push(name + ' 的 permissions.' + key + ' 含未知工具名');
                 if (p.whitelistOnly != null && typeof p.whitelistOnly !== 'boolean') errors.push(name + ' 的 permissions.whitelistOnly 必须是布尔');
                 if (p.whitelistOnly === true && !Array.isArray(p.allow)) errors.push(name + ' 的 whitelistOnly 需要 allow 白名单');
-                for (const key of ['blueprintAuthority', 'finishGate']) if (p[key] != null && typeof p[key] !== 'boolean') errors.push(name + ' 的 permissions.' + key + ' 必须是布尔');
+                for (const key of ['finishGate']) if (p[key] != null && typeof p[key] !== 'boolean') errors.push(name + ' 的 permissions.' + key + ' 必须是布尔');
             }
         }
         if (entry?.profile != null && (typeof entry.profile !== 'string' || !entry.profile.endsWith('.json'))) errors.push(name + ' 的 profile 必须为 JSON 文件路径');
@@ -131,11 +132,11 @@ export function validateTeamSpec(spec) {
             if (names.length < 2 || !actionAllowed(spec, entry, 'delegate_site').allowed) errors.push('独立蓝图模式需要派工入口和至少一名执行者');
             for (const name of names.filter(name => name !== entry)) {
                 const caps = capabilities(spec, name);
-                if (!edgeAllows(spec, entry, name) || !caps.canBuild || !caps.blueprintAuthority || !actionAllowed(spec, name, 'design_blueprint').allowed) {
+                if (!edgeAllows(spec, entry, name) || !caps.canBuild || !actionAllowed(spec, name, 'design_blueprint').allowed) {
                     errors.push(name + ' 需要与入口直连且具有独立设计和施工权限');
                 }
             }
-        } else if (!capabilities(spec, entry).blueprintAuthority || !actionAllowed(spec, entry, 'design_blueprint').allowed) {
+        } else if (!actionAllowed(spec, entry, 'design_blueprint').allowed) {
             errors.push('本版团队入口需要蓝图设计权限');
         }
         if (!capabilities(spec, entry).finishGate) errors.push('本版团队入口需要全局验收权限');
@@ -237,28 +238,18 @@ const PRESET_INSTRUCTIONS = {
     },
 
     router: {
-        entry: (router) => [
-            '负责接收原始指令、观察现场、发布共享蓝图和最终验收。发布后核对自己的站位与蓝图世界边界、进出通路。若占用施工区或通路，先观察范围外有支撑且脚头空间畅通的站位，用 move_to 移过去。确认站位安全后，把未完工范围作为一个正式父任务交给 ' + router + '，写明要求和依赖。',
-            '收到 ' + router + ' 转达的【让路】时，优先移到施工区和通路外。移动确认后立即用 send_message 回给 ' + router + '，开头写【已让路】，附原受阻的世界坐标和现在的位置。随后用 list_tasks 检查 Router 的父任务；该任务若为 blocked，用 reassign_task 把同一个任务 ID 恢复给 Router。无法安全移开时，回复实测限制。',
-            '执行者的筛选和细分由 Router 完成。用 wait_for_team 等待 Router 汇总已验收的结果。若 Router 报告蓝图与现场冲突，观察具体坐标并如实说明阻塞。最终对照用户要求与现场证据完成项目。'
+        entry: [
+            '你负责模型路由和整体验收。收到用户目标后，先观察场地（observe_environment 指定世界坐标 region）并评估需要的能力：材料风格、结构类型、尺寸，以及是否涉及装饰或景观。',
+            '每条「模型路由」关系的说明写明对应 Builder 的专长（提示词 profile）。对照用户要求选出能力最匹配的一位 Builder，只把整项任务交给这一位；其余 Builder 不施工。若要求同时涉及多种能力，优先选覆盖核心要求最多的一位，不要拆分给多人。',
+            '用 delegate_site 给选中的 Builder 登记一次绝对世界坐标 region 和施工 origin。origin 的 Y 是建筑第一层的位置。工地大小按用户要求估算，不要指定建筑形状、材质或内部做法，原始任务由工具原样交给该 Builder。',
+            '派工前核对站位，若占用工地或通路，先移到范围外再派工。派工后用 wait_for_team 等事件；该 Builder 会自行设计蓝图并施工，蓝图与建造完全由它负责。',
+            '完工后调用 inspect_build 核对现场，对照原始要求验收整项结果，再更新计划并执行 finish。若现场条件无法满足，报告具体坐标和原因。'
         ].join('\n'),
-        router: lead => [
-            '你专职路由。收到 Lead 的父任务后，读取共享蓝图、施工清单和成员状态，把父任务中尚未完成的格子按所需能力拆成明确范围。',
-            '派工前对照当前站位、蓝图实际施工边界和 Builder 动线。若身处目标格、施工落脚点或进出通道，先观察边界外的安全站位（下方有支撑，脚和头有空间），用 move_to 自主移开。等待期间留在施工范围与进出路径之外。',
-            '收到【让路】时核对挡路者和世界坐标。若是你挡路，观察可达的安全站位并 move_to；创造模式下也可用 fly_to 绕行，再在施工区外 land_at（需要时先 get_tool_help）。确认实际位置后回复【已让路】；若无法移动则告知限制。若是 ' + lead + ' 挡路，立即转发原任务 ID、Builder 名称和受阻坐标给 ' + lead + '，等待其确认。挡路者是其他相连成员时同样转达。',
-            '收到【已让路】或你自行移开后，用 list_tasks 查原施工任务，并把已确认的位置和原受阻坐标发给对应 Builder。任务仍 running 时请它复查并继续；若已 blocked，用 reassign_task 恢复同一任务。若只在协调回合，消息发完后 end_turn，等领回父任务再恢复子任务。父任务恢复后沿用原子任务和依赖。',
-            '每条「模型路由」关系的备注列出执行者所配模型，关系说明可补充模型擅长的任务或实测经验。选择时优先匹配明确的能力证据，再考虑在线、可领任务和场地条件。档案相同或能力未知时，用就绪状态、相关已验证结果和当前任务量分配，模型名本身不代表强弱。',
-            '先按现场支撑和通路明确施工依赖，再决定何时派给谁。不同范围也可能互相提供支撑。例如金字塔顶层必须等待中间层，不能因为格子互不重叠就当作可独立开工。',
-            '用 delegate_task 按依赖顺序先登记前序任务，拿到返回的 taskId 后，再给后序任务填写 dependsOn。填写实际任务 ID，而不是部件号或 Router 的父任务 ID。若前序还没登记、暂时无人可接，则先保留下游范围，等前序登记或现场已核验就绪再派。任务描述写清选派依据、范围和验收条件。独立任务可以并行，也可由同一位合适的执行者连续完成。',
-            '派单后用 wait_for_team 等事件。前序验收完成时，若发现某个已领任务的执行者正等待这个支撑，立即用 send_message 直接通知该执行者前序已完成，请其复查支撑并继续。若任务已报告 blocked，确认障碍解除后用 reassign_task 恢复原任务；任务仍 running 时直接沟通，避免重复派单。',
-            '用 list_tasks 查看已经转交的部件和子任务证据。子任务全完成后汇总各部分证据并调用 complete_task，由验收检查原委托完整范围。无人具备必要能力时向 Lead 说明缺口。'
-        ].join('\n'),
-        member: router => [
-            '只在领到 ' + router + ' 的正式任务后施工。开工时用 inspect_part 确认分配范围、材料和坐标，再抽查关键支撑。支撑已就绪就执行范围内的放置建议，保留蓝图版本与精确材料 ID，施工后再复查。',
-            '若 entity_in_way 指向自己，先移开；目标格或通路被队友占用时，向 ' + router + ' 发一次【让路】，把原任务 ID、挡路者和受阻世界坐标放在消息开头。先继续范围内其他安全工序；若因占位无法继续，用 blocked 记录同样的信息。',
-            '收到【已让路】后，仍持有任务时复查原受阻格并继续施工。处于协调回合时用 end_turn 等正式重派。领回原任务后先检查实际缺失格，从保留的进度接着做。',
-            '现场仍缺前序支撑时，把受阻坐标、所缺支撑和解除条件直接发给 ' + router + '，再用 blocked 报告，释放这项任务以便恢复。等待其他执行者的结果不能替代正式阻塞上报。',
-            '完成后现场核验当前任务全部范围，再用 complete_task 回报结果和证据。'
+        builder: (router, specialty) => [
+            '你的委托包含完整原始建筑任务及独立工地。读取 team.assignment.site 的世界坐标 region 和 origin，核对自己的地面支撑与空间，用 update_plan 制定本建筑的计划。',
+            specialty,
+            '调用 design_blueprint 发布自己的蓝图。设计原点是委托的 origin，所有建筑方块与有意保留的空位都要落在本工地。发布后通过 inspect_part 和施工工具完成本建筑。',
+            '验收自己整座建筑，标记计划完成，再用 complete_task 向 ' + router + ' 提交建筑特征和现场证据。若发现边界或支撑条件无法满足原始要求，报告具体坐标和原因。'
         ].join('\n')
     },
     competitive: {
@@ -294,7 +285,7 @@ const PRESET_INSTRUCTIONS = {
 const NO_SHARE = ['propose_task_share', 'respond_task_share', 'commit_task_share'];
 const NO_DELEGATE = ['design_blueprint', 'delegate_task', 'prepare_parallel_build'];
 const COORDINATOR_PERMISSIONS = {
-    whitelistOnly: true, blueprintAuthority: true, finishGate: true, allow: [
+    whitelistOnly: true, finishGate: true, allow: [
         'get_tool_help', 'send_message', 'list_peers', 'observe_environment', 'observe_cells', 'inspect_block',
         'look_at', 'move_to', 'fly_to', 'land_at', 'list_materials', 'design_blueprint', 'inspect_blueprint',
         'get_build_checklist', 'inspect_part', 'inspect_build', 'delegate_task', 'reassign_task', 'list_tasks'
@@ -338,8 +329,8 @@ function debatingPreset(names = ['arch_1', 'arch_2', 'arch_3']) {
     const agents = Object.fromEntries(names.map(name => [name, {
         role: 'builder',
         permissions: name === entry
-            ? { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true }
-            : { deny: [], blueprintAuthority: true },
+            ? { allow: ['*'], deny: [], finishGate: true }
+            : { deny: [] },
         instructions: name === entry ? instructions.entry : instructions.member
     }]));
     return teamSpec(entry, agents, fullMesh(names, (from, to) =>
@@ -365,7 +356,6 @@ function parallelPreset(names = ['lead', 'builder1', 'builder2', 'builder3']) {
     const [lead, ...workers] = names;
     const instructions = PRESET_INSTRUCTIONS.parallel;
     const entry = coordinator(instructions.entry(workers));
-    entry.permissions.blueprintAuthority = false;
     entry.permissions.allow = entry.permissions.allow.filter(name => !['design_blueprint', 'delegate_task'].includes(name));
     entry.permissions.allow.push('delegate_site');
     return {
@@ -373,7 +363,7 @@ function parallelPreset(names = ['lead', 'builder1', 'builder2', 'builder3']) {
             [lead]: entry,
             ...Object.fromEntries(workers.map(name => [name, {
                 role: 'module_builder',
-                permissions: { blueprintAuthority: true, deny: [
+                permissions: { deny: [
                     'delegate_site', 'delegate_task', 'prepare_parallel_build', 'reassign_task', ...NO_SHARE
                 ] },
                 instructions: instructions.member(lead)
@@ -429,42 +419,41 @@ function swarmPreset(names = ['lead', 'builder_a', 'builder_b', 'builder_c']) {
 }
 
 
-function routerPreset(names = ['lead', 'router', 'builder_1', 'builder_2']) {
-    if (!Array.isArray(names) || names.length < 3 || new Set(names).size !== names.length ||
-        names.some(name => typeof name !== 'string' || !name)) {
-        throw new Error('模型路由预设需要独立的蓝图 Lead、Router 和至少一位执行者');
-    }
-    const [lead, router, ...workers] = names;
+const ROUTER_BUILDERS = [
+    { specialty: '你的专长是石材与砖类建筑：圆石、石砖、红砖、砂岩等砌体材料，擅长城墙、塔楼、石砌房屋等稳固的砖石结构。',
+      summary: '石材与砖类（圆石、石砖、红砖、砂岩）砌体结构，如城墙、塔楼、石屋' },
+    { specialty: '你的专长是木质建筑：橡木、云杉、白桦等原木与木板材料，擅长木屋、农舍、木桥等木质结构。',
+      summary: '木质（橡木、云杉、白桦）结构，如木屋、农舍、木桥' },
+    { specialty: '你的专长是现代材料与装饰：玻璃、混凝土、石英、羊毛与照明，擅长现代建筑、室内装饰和灯光布置。',
+      summary: '现代材料与装饰（玻璃、混凝土、石英、羊毛、照明），如现代建筑、室内装潢' },
+    { specialty: '你的专长是景观与综合：路径、庭院、园林与混合材料，擅长庭院铺装、绿化和小品等室外环境。',
+      summary: '景观与综合（路径、庭院、园林、混合材料），如庭园、铺装、绿化' }
+];
+
+function routerPreset(names = ['router', 'builder_1', 'builder_2', 'builder_3', 'builder_4']) {
+    requireMembers(names, 5, '模型路由');
+    const [router, ...builders] = names;
     const instructions = PRESET_INSTRUCTIONS.router;
     return {
-        coordination: 'relationships',
-        entryAgent: lead,
-        agents: {
-            [lead]: {
-                role: 'lead',
-                permissions: { allow: ['*'], deny: ['prepare_parallel_build'], blueprintAuthority: true, finishGate: true },
-                instructions: instructions.entry(router)
-            },
+        ...teamSpec(router, {
             [router]: {
                 role: 'router',
-                permissions: { whitelistOnly: true, allow: [
-                    'get_tool_help', 'send_message', 'list_peers', 'list_tasks', 'get_build_checklist',
-                    'inspect_part', 'inspect_blueprint', 'inspect_build', 'observe_environment', 'observe_cells', 'inspect_block',
-                    'move_to', 'fly_to', 'land_at', 'delegate_task', 'reassign_task'
+                permissions: { whitelistOnly: true, finishGate: true, allow: [
+                    'get_tool_help', 'send_message', 'list_peers', 'list_tasks', 'reassign_task',
+                    'observe_environment', 'observe_cells', 'inspect_block', 'look_at', 'move_to', 'fly_to', 'land_at',
+                    'list_materials', 'inspect_blueprint', 'get_build_checklist', 'inspect_part', 'inspect_build',
+                    'delegate_site'
                 ] },
-                instructions: instructions.router(lead)
+                instructions: instructions.entry
             },
-            ...Object.fromEntries(workers.map(name => [name, {
+            ...Object.fromEntries(builders.map((name, i) => [name, {
                 role: 'builder',
-                permissions: { deny: ['design_blueprint', 'delegate_task', 'prepare_parallel_build', 'propose_task_share', 'respond_task_share', 'commit_task_share'] },
-                instructions: instructions.member(router)
+                permissions: { deny: ['delegate_site', 'delegate_task', 'prepare_parallel_build', 'reassign_task', ...NO_SHARE] },
+                instructions: instructions.builder(router, ROUTER_BUILDERS[i].specialty)
             }]))
-        },
-        edges: [
-            { from: lead, to: router, label: '蓝图与路由委托', description: lead + ' 发布共享蓝图并把施工范围交给 ' + router + '；Router 根据执行者模型和任务要求选人、细分、派单，最后向 Lead 汇总。Builder 的让路请求由 Router 转达，收到确认后恢复原任务。' },
-            ...workers.map(worker => ({ from: router, to: worker, label: '模型路由',
-                description: router + ' 根据 ' + worker + ' 的模型和能力选择合适的工作。可在本关系说明补充该模型的擅长项或实测表现。' + worker + ' 仅执行收到的正式任务并汇报。' }))
-        ]
+        }, builders.map((name, i) => relation(router, name, '模型路由',
+            router + ' 根据用户要求匹配 ' + name + ' 的专长，选中后把整项任务交给它独立设计并施工；未选中者不施工。' + name + ' 的专长：' + ROUTER_BUILDERS[i].summary))),
+        blueprintMode: 'independent'
     };
 }
 

@@ -137,7 +137,7 @@
         <div style="flex:2"><label>伙伴角色名称</label>
           <input id="roleInput" list="roleList" placeholder="lead / builder / inspector / 自定义…">
           <datalist id="roleList">
-            <option value="lead">蓝图权威 + 全局验收</option>
+            <option value="lead">设计蓝图 + 全局验收</option>
             <option value="builder">施工，禁设计</option>
             <option value="inspector">只读巡检</option>
           </datalist>
@@ -155,7 +155,6 @@
       </div>
       <div id="permPanel">
         <div class="perm-cap-row">
-          <label><input type="checkbox" id="capBlueprint"> 蓝图权威（可设计蓝图）</label>
           <label><input type="checkbox" id="capFinish"> 全局验收（可提交 finish）</label>
           <label><input type="checkbox" id="capWhitelist"> 仅白名单模式（未勾选=全部允许再排除）</label>
         </div>
@@ -631,14 +630,14 @@ function buildPermGrid() {
     tools.map(tool => `<label><input type="checkbox" data-perm="${tool}"> ${tool}</label>`).join('') + '</details>'
   ).join('');
   $('#permGrid').querySelectorAll('[data-perm]').forEach(box => box.onchange = writePermissions);
-  for (const id of ['capBlueprint', 'capFinish', 'capWhitelist']) $('#' + id).onchange = writePermissions;
+  for (const id of ['capFinish', 'capWhitelist']) $('#' + id).onchange = writePermissions;
   if (selected?.type === 'agent') fillPermPanel(graph.agents[selected.name]);
 }
 function permissionsFor(agent) {
-  const builder = { allow: ['*'], deny: ['design_blueprint'], blueprintAuthority: false, finishGate: false };
+  const builder = { allow: ['*'], deny: ['design_blueprint'], finishGate: false };
   if (agent.permissions) return { ...builder, ...agent.permissions };
-  if (agent.role === 'lead') return { allow: ['*'], deny: [], blueprintAuthority: true, finishGate: true };
-  if (agent.role === 'inspector') return { allow: ['get_tool_help', 'send_message', 'broadcast', 'list_peers', 'observe_environment', 'observe_cells', 'inspect_block', 'look_at', 'inspect_build', 'get_build_checklist', 'inspect_part', 'inspect_blueprint', 'list_materials', 'claim_part', 'release_part', 'query_claims', 'move_to', 'fly_to', 'land_at'], deny: [], whitelistOnly: true, blueprintAuthority: false, finishGate: false };
+  if (agent.role === 'lead') return { allow: ['*'], deny: [], finishGate: true };
+  if (agent.role === 'inspector') return { allow: ['get_tool_help', 'send_message', 'broadcast', 'list_peers', 'observe_environment', 'observe_cells', 'inspect_block', 'look_at', 'inspect_build', 'get_build_checklist', 'inspect_part', 'inspect_blueprint', 'list_materials', 'claim_part', 'release_part', 'query_claims', 'move_to', 'fly_to', 'land_at'], deny: [], whitelistOnly: true, finishGate: false };
   return builder;
 }
 function fillPermPanel(agent) {
@@ -650,7 +649,6 @@ function fillPermPanel(agent) {
     const tool = box.dataset.perm;
     box.checked = p.whitelistOnly ? allowed.has(tool) : (allowed.has('*') || allowed.has(tool)) && !denied.has(tool);
   });
-  $('#capBlueprint').checked = p.blueprintAuthority === true;
   $('#capFinish').checked = p.finishGate === true;
   $('#capWhitelist').checked = p.whitelistOnly === true;
 }
@@ -662,7 +660,7 @@ function writePermissions() {
     const whitelist = $('#capWhitelist').checked;
     agent.permissions = {
       ...(whitelist ? { allow: checked, whitelistOnly: true } : { allow: ['*'], deny: knownTools.filter(t => !checked.includes(t)) }),
-      blueprintAuthority: $('#capBlueprint').checked, finishGate: $('#capFinish').checked
+      finishGate: $('#capFinish').checked
     };
   }
   syncToEditor(); markDirty();
@@ -798,7 +796,7 @@ function syncToEditor() {
   $('#teamEditor').value = JSON.stringify(graphToSpec(), null, 2);
   const names = agentNames();
   $('#teamEntry').replaceChildren(...names.map(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; return option; }));
-  $('#teamEntry').value = graph.entryAgent ?? names.find(name => ['lead'].includes(graph.agents[name].role) || graph.agents[name].permissions?.blueprintAuthority) ?? names[0] ?? '';
+  $('#teamEntry').value = graph.entryAgent ?? names.find(name => ['lead'].includes(graph.agents[name].role) || graph.agents[name].permissions?.finishGate) ?? names[0] ?? '';
 }
 $('#teamEditor').onblur = () => {
   try { specToGraph(JSON.parse($('#teamEditor').value)); markDirty(); }
@@ -811,7 +809,7 @@ $('#toggleJson').onclick = () => {
 const PRESET_POSITIONS = {
   pipeline: [[0.5, 0.22], [0.16, 0.50], [0.5, 0.65], [0.84, 0.77]],
   centralized: [[0.5, 0.23], [0.26, 0.72], [0.74, 0.72]],
-  router: [[0.5, 0.19], [0.5, 0.46], [0.24, 0.79], [0.76, 0.79]],
+  router: [[0.5, 0.18], [0.14, 0.72], [0.38, 0.78], [0.62, 0.78], [0.86, 0.72]],
   competitive: [[0.5, 0.24], [0.24, 0.72], [0.76, 0.72]],
   parallel: [[0.5, 0.23], [0.18, 0.72], [0.5, 0.72], [0.82, 0.72]],
   voting: [[0.5, 0.22], [0.18, 0.67], [0.5, 0.80], [0.82, 0.67]],

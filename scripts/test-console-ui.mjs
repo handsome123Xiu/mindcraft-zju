@@ -105,7 +105,7 @@ try {
     const modes = ['pipeline', 'centralized', 'router', 'competitive', 'parallel',
         'voting', 'peers', 'handoff', 'blackboard', 'swarm'];
     assert.deepEqual(await evaluate("[...document.querySelectorAll('[data-preset]')].map(button => button.dataset.preset)"), modes);
-    const edgesByMode = { pipeline: 5, centralized: 3, router: 3, competitive: 2, parallel: 3,
+    const edgesByMode = { pipeline: 5, centralized: 3, router: 4, competitive: 2, parallel: 3,
         voting: 3, peers: 3, handoff: 2, blackboard: 3, swarm: 5 };
     for (const mode of [...modes.filter(mode => mode !== 'centralized'), 'centralized']) {
         saved = null;
@@ -166,7 +166,7 @@ try {
     // Renaming a role must not reset manually chosen capabilities.
     const original = await evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.lead");
     await evaluate("document.querySelector('#roleInput').value='architect'; document.querySelector('#roleInput').dispatchEvent(new Event('change',{bubbles:true}));");
-    assert.equal(await evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.lead.permissions.blueprintAuthority"), true);
+    assert.equal(await evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.lead.permissions.finishGate"), true);
     assert.equal(original.role, 'lead');
     const configuredSpec = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
     // 预设切换 = 完整模板替换画布（曾经的 useExisting 沿用旧成员，画布看起来没反应）。
@@ -184,6 +184,9 @@ try {
     await click('[data-tab=control]'); await screenshot('console-control-desktop.png');
     await click('[data-tab=teamTab]');
     await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    // 切换视口后布局重排是异步的：等画布收缩到移动端尺寸再点预设，
+    // 否则 applyTeamPreset 会读到上一次（桌面）的 getBoundingClientRect 宽度。
+    await until(() => evaluate("document.querySelector('#teamCanvas').getBoundingClientRect().width < 400"), 'Mobile canvas did not settle');
     for (const mode of modes) {
         await click(`[data-preset=${mode}]`);
         const names = Object.keys(TEAM_PRESETS[mode]().agents);

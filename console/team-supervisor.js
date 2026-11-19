@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { createTeamRuntime, entryAgent } from '../src/building/team-runtime.js';
-import { validateTeamSpec, capabilities } from '../src/building/team-state.js';
+import { validateTeamSpec } from '../src/building/team-state.js';
 import { BUILDING_MODEL_APIS } from '../src/building/model.js';
 import { createTeamTranscript } from './team-transcript.js';
 
@@ -27,7 +27,6 @@ export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
                 const validation = validateTeamSpec(spec);
                 if (!validation.ok) throw new Error(validation.errors.join('；'));
                 const entry = entryAgent(spec);
-                if (!capabilities(spec, entry).blueprintAuthority) throw new Error('团队入口需要蓝图权威（blueprintAuthority）角色，负责规划与派单');
                 const mcPort = Number(port ?? settings.port);
                 if (!Number.isInteger(mcPort) || mcPort < 1 || mcPort > 65535) throw new Error('请设置有效的 Minecraft LAN 端口');
                 const configs = [];

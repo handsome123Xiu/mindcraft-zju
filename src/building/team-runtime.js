@@ -356,7 +356,6 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     if (independent) {
                         const task = requireTask();
                         if (run.paused) throw new Error('团队工程已暂停');
-                        if (!capabilities(run.spec, name).blueprintAuthority) throw new Error('缺少独立蓝图设计权限');
                         if (task.assignment) {
                             if (args.previousVersion === 0 && isDeepStrictEqual(args.assignment, task.assignment) && isDeepStrictEqual(args.design, task.design)) {
                                 return { assignmentVersion: task.blueprintVersion, currentTask: taskForWorker(task) };
@@ -377,9 +376,8 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                         leaseTask(state, run, task, session);
                         return { assignmentVersion: task.blueprintVersion, currentTask: taskForWorker(task) };
                     }
-                    // 设计者由团队协商推选：任何具备蓝图权威的成员都可发布，
-                    // 不硬绑 run.root（peers 模式全员有权威；层级模式只有 lead）。
-                    if (!capabilities(run.spec, name).blueprintAuthority) throw new Error('缺少蓝图设计权限');
+                    // 设计者由团队协商推选：任何具备 design_blueprint 权限的成员都可发布，
+                    // 不硬绑 run.root（peers 模式全员可设计；层级模式只有 lead）。
                     if (Object.values(state.tasks).some(t => t.runId === run.id && !terminal(t))) throw new Error('请先完成或取消现有子任务，再修订蓝图');
                     if (Object.values(state.claims).some(c => c.runId === run.id)) throw new Error('请先释放施工租约再修订蓝图');
                     if (args.previousVersion !== run.blueprintVersion) throw new Error('蓝图版本已变化');
@@ -625,9 +623,10 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     task.finishedToken = task.token;
                     releaseTask(state, task); report(state, task, 'task_result');
                     if (task.site && task.status === 'completed') {
-                        const tasks = Object.values(state.tasks).filter(t => t.runId === run.id);
-                        if (tasks.length === Object.keys(run.spec.agents).length - 1 && tasks.every(t => t.status === 'completed')) {
-                            run.assignment = independentBuilding(run.dimension, tasks);
+                        // 独立蓝图：所有已委托的工地都完工即可汇总验收（不要求每个非入口成员都有工地）。
+                        const sites = Object.values(state.tasks).filter(t => t.runId === run.id && t.site);
+                        if (sites.length > 0 && sites.every(t => t.status === 'completed')) {
+                            run.assignment = independentBuilding(run.dimension, sites);
                             run.design = { origin: run.origin, summary: '已完工的独立蓝图汇总' };
                             run.blueprintVersion++;
                         }
