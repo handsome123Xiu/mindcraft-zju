@@ -13,6 +13,7 @@ import { decisionInstructions } from '../src/building/decision-context.js';
 import { createBuildingTools } from '../src/building/tools.js';
 import { compileBlueprint } from '../src/building/blueprint.js';
 import { createTeamTranscript } from '../console/team-transcript.js';
+import { preserveTaskDependencies } from '../console/team-config.js';
 
 const spec = {
     coordination: 'relationships', entryAgent: 'lead',
@@ -298,64 +299,205 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
 
 
 
-// Competitive candidates have separate inboxes, and only the chosen candidate gets a build lease.
+// Competitive (independent mode) hands TWO candidates their own sites; both design
+// and build independently; the lead inspects both and judges. blockLimit caps each
+// candidate's blueprint at generation time and at the runtime publish gate.
 {
     const competition = TEAM_PRESETS.competitive();
     assert(validateTeamSpec(competition).ok);
+    assert.equal(competition.entryAgent, 'lead');
+    assert.equal(competition.blueprintMode, 'independent');
+    assert.equal(competition.blockLimit, 200);
+    assert.deepEqual(Object.keys(competition.agents), ['lead', 'candidate_a', 'candidate_b']);
+    // Lead delegates sites and inspects, but never designs, builds, or tasks.
+    assert(actionAllowed(competition, 'lead', 'delegate_site').allowed);
+    assert(!actionAllowed(competition, 'lead', 'design_blueprint').allowed);
+    assert(!actionAllowed(competition, 'lead', 'place_block').allowed);
+    assert(!actionAllowed(competition, 'lead', 'delegate_task').allowed);
+    assert(capabilities(competition, 'lead').finishGate);
+    // Each candidate designs and builds its own site, but never delegates.
+    for (const name of ['candidate_a', 'candidate_b']) {
+        assert(actionAllowed(competition, name, 'design_blueprint').allowed);
+        assert(capabilities(competition, name).canBuild);
+        assert(!actionAllowed(competition, name, 'delegate_site').allowed);
+        assert(!actionAllowed(competition, name, 'delegate_task').allowed);
+    }
+    // The lead prompt carries the judging rubric and only the site-delegation tool.
+    const team = { runtime: true, self: 'lead', spec: () => competition };
+    const decision = decisionInstructions({ assignment, teamTask: null, events: [] }, team, 'lead');
+    assert.match(decision.instructions, /美观/);
+    assert(decision.nativeFunctions.some(fn => fn.name === 'delegate_site'));
+    assert(!decision.nativeFunctions.some(fn => fn.name === 'design_blueprint' || fn.name === 'place_block' || fn.name === 'delegate_task'));
+
     const f = fixture(competition, ':memory:', false);
     try {
-        const candidates = ['candidate_a', 'candidate_b'];
-        const brief = '【方案征集】观察到平地，请提交一座木屋的布局、材料、施工顺序和风险。';
-        for (const [index, candidate] of candidates.entries()) {
-            f.call('lead', 'message', { runId: 'run', recipient: candidate, text: brief });
-            const [invitation] = f.call(candidate, 'inbox');
-            assert.equal(invitation.payload.text, brief);
-            assert.equal(invitation.payload.context.request, 'Build floor');
-            f.call(candidate, 'ack', { ids: [invitation.id] });
-            f.call(candidate, 'message', { runId: 'run', recipient: 'lead', text: '【参赛方案】候选方案 ' + (index + 1) });
+        // The lead gives each candidate its own non-overlapping site.
+        const siteA = f.call('lead', 'delegate_site', { runId: 'run', recipient: 'candidate_a',
+            origin: [0, 0, 0], region: { min: [0, 0, 0], max: [6, 0, 6] } });
+        const siteB = f.call('lead', 'delegate_site', { runId: 'run', recipient: 'candidate_b',
+            origin: [0, 0, 10], region: { min: [0, 0, 10], max: [6, 0, 16] } });
+        assert(siteA.taskId && siteB.taskId);
+        // The lead never publishes a shared blueprint.
+        assert.throws(() => f.call('lead', 'publish', { runId: 'run', previousVersion: 0, assignment }), /design_blueprint/);
+        // Both candidates design and build their own site.
+        for (const [name, site] of [['candidate_a', siteA], ['candidate_b', siteB]]) {
+            const task = f.call(name, 'take_task').task;
+            assert.equal(task.id, site.taskId);
+            // Over-limit blueprints are rejected at the runtime publish gate.
+            assert.throws(() => f.call(name, 'publish', { runId: 'run', taskId: task.id, token: task.token,
+                previousVersion: 0, design: { origin: task.site.origin, summary: '超限设计' },
+                assignment: { version: 1, dimension: 'overworld',
+                    blueprint: compileBlueprint({ shapes: [
+                        { kind: 'box', part: 'floor', min: [0, 0, 0], max: [19, 0, 19], block: 'stone' }
+                    ] }, task.site.origin) } }), /超过上限/);
+            // A compliant blueprint fits the site and publishes.
+            f.call(name, 'publish', { runId: 'run', taskId: task.id, token: task.token, previousVersion: 0,
+                design: { origin: task.site.origin, summary: '独立设计木屋' },
+                assignment: { version: 1, dimension: 'overworld',
+                    blueprint: compileBlueprint({ shapes: [
+                        { kind: 'box', part: 'floor', min: [0, 0, 0], max: [3, 0, 3], block: 'stone' }
+                    ] }, task.site.origin) } });
+            f.call(name, 'task_result', { runId: 'run', taskId: task.id, token: task.token,
+                blueprintVersion: 1, status: 'completed', summary: '本工地施工核验通过',
+                evidence: [{ partId: 'part-1', total: 16, remaining: 0 }] });
         }
-        assert.throws(() => f.call('candidate_a', 'message', { runId: 'run', recipient: 'candidate_b', text: 'Share my proposal' }), /没有允许此消息的连线/);
-        assert.throws(() => f.call('lead', 'delegate', delegate('early', 'candidate_b')), /先发布当前蓝图/);
-        assert.deepEqual(f.call('lead', 'inbox').map(event => event.from), candidates);
-        assert.deepEqual(f.call('candidate_b', 'inbox'), []);
-        f.call('lead', 'publish', { runId: 'run', previousVersion: 0, assignment });
-        f.call('lead', 'delegate', delegate('winning-proposal', 'candidate_b'));
-        assert.equal(f.call('candidate_a', 'take_task'), null);
-        const winner = f.call('candidate_b', 'take_task').task;
-        const grant = { ...scopeOf(winner), partId: 'part-1', positions: [[0, 0, 0]] };
-        assert.equal(f.call('candidate_b', 'assert_write', grant).status, 'allowed');
-        assert.throws(() => f.call('candidate_a', 'assert_write', grant), /任务或执行租约已失效/);
-        f.finish('candidate_b', winner, 8);
+        // The finish gate only opens once every site is complete.
         assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
     } finally { f.runtime.close(); }
 }
 
-// Run the five new presets against real runtime task and communication permissions.
+// Pipeline handoff drives the real clients and scoped building tools without entry approval.
 {
-    const f = fixture(TEAM_PRESETS.pipeline());
-    const chat = [];
+    const template = TEAM_PRESETS.pipeline();
+    const stale = structuredClone(template);
+    for (const node of Object.values(stale.agents)) delete node.taskAfter;
+    const { spec: pipeline, preserved } = preserveTaskDependencies(stale, template);
+    assert.deepEqual(preserved, ['builder2', 'builder3']);
+    assert.equal(stale.agents.builder2.taskAfter, undefined, 'save reconciliation must not mutate the request');
+    const cleared = structuredClone(template);
+    cleared.agents.builder3.taskAfter = null;
+    assert.equal(preserveTaskDependencies(cleared, template).spec.agents.builder3.taskAfter, null);
+    const centralized = TEAM_PRESETS.centralized();
+    assert.deepEqual(preserveTaskDependencies(centralized, template).spec, centralized, 'changing paradigms must not inherit pipeline dependencies');
+    const changedRoute = structuredClone(stale);
+    changedRoute.agents.builder2.taskReportTo = 'lead';
+    assert.equal(preserveTaskDependencies(changedRoute, template).spec.agents.builder2.taskAfter, undefined);
+    assert.equal(pipeline.agents.builder1.taskReportTo, 'builder2');
+    assert.equal(pipeline.agents.builder2.taskReportTo, 'builder3');
+    assert.equal(pipeline.agents.builder3.taskReportTo, 'lead');
+    const cyclic = structuredClone(pipeline);
+    cyclic.agents.builder1.taskAfter = 'builder2';
+    assert(!validateTeamSpec(cyclic).ok, 'workflow prerequisites cannot contain a cycle');
+    const invalid = structuredClone(pipeline);
+    invalid.agents.builder1.taskReportTo = 'builder3';
+    assert(!validateTeamSpec(invalid).ok, 'handoffs require an actual relationship');
+    const f = fixture(pipeline);
+    const chat = [], events = [], requests = [], started = [], clients = [], errors = [];
+    const cells = new Map();
+    const world = {
+        snapshot: () => ({ dimension: 'overworld', position: [0, 0, 2], gameMode: 'creative' }),
+        read: pos => cells.get(pos.join(',')) ?? (pos[1] < 0 ? 'stone' : 'air'),
+        async prepare() {},
+        async place({ pos, block, authorize }) {
+            await authorize([pos]);
+            cells.set(pos.join(','), block);
+            return 'placed';
+        }
+    };
     const transcript = createTeamTranscript({ snapshot: () => f.runtime.snapshot(), log: () => {},
         notify: (speaker, text) => chat.push({ speaker, text }) });
+    const call = (name, method, args = {}) => {
+        requests.push({ name, method });
+        const result = f.call(name, method, args);
+        transcript(name, method, args, result);
+        return result;
+    };
+    const until = async predicate => {
+        const deadline = Date.now() + 10000;
+        while (!predicate()) {
+            if (errors.length) throw errors[0];
+            if (Date.now() >= deadline) throw new Error('pipeline client handoff timed out');
+            await new Promise(resolve => setTimeout(resolve, 20));
+        }
+    };
+    let releaseFirst;
+    const firstGate = new Promise(resolve => { releaseFirst = resolve; });
     try {
-        const floor = f.call('lead', 'delegate', delegate('floor', 'builder1', [[0,0,0], [1,0,0]]));
-        const wall = f.call('lead', 'delegate', delegate('wall', 'builder2', [[2,0,0], [3,0,0]],
-            { dependsOn: [floor.taskId] }));
-        f.call('lead', 'delegate', delegate('roof', 'builder3', [[4,0,0], [5,0,0], [6,0,0], [7,0,0]],
-            { dependsOn: [wall.taskId] }));
-        const first = f.call('builder1', 'take_task').task;
-        assert.equal(f.call('builder2', 'take_task'), null);
-        const handoff = { runId: 'run', recipient: 'builder2', text: '地基核验通过，支撑位置已确认。' };
-        transcript('builder1', 'message', handoff, f.call('builder1', 'message', handoff));
-        assert.deepEqual(chat, [{ speaker: 'builder1', text: '[-> builder2] ' + handoff.text }]);
-        assert.equal(f.call('builder2', 'take_task'), null, 'a message alone does not release the next stage');
-        f.finish('builder1', first, 2);
-        const second = f.call('builder2', 'take_task').task;
-        assert.equal(f.call('builder3', 'take_task'), null);
-        f.finish('builder2', second, 2);
-        f.finish('builder3', f.call('builder3', 'take_task').task, 4);
-        assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
-    } finally { f.runtime.close(); }
+        assert.throws(() => call('lead', 'delegate', delegate('out-of-order', 'builder3', [[4,0,0]])), /taskAfter/);
+        const floor = call('lead', 'delegate', delegate('floor', 'builder1', [[0,0,0], [1,0,0]]));
+        const wall = call('lead', 'delegate', delegate('wall', 'builder2', [[2,0,0], [3,0,0]]));
+        call('lead', 'delegate', delegate('roof', 'builder3', [[4,0,0], [5,0,0], [6,0,0], [7,0,0]]));
+        const queued = f.runtime.snapshot().tasks;
+        assert.deepEqual(queued.find(task => task.to === 'builder2').dependsOn, [floor.taskId]);
+        assert.deepEqual(queued.find(task => task.to === 'builder3').dependsOn, [wall.taskId]);
+        requests.length = 0;
+        for (const name of ['builder1', 'builder2', 'builder3']) {
+            const channel = new EventEmitter();
+            channel.connected = true;
+            channel.send = (message, callback) => {
+                let response;
+                try { response = { result: call(name, message.method, message.args) }; }
+                catch (error) { response = { error: error.message }; }
+                queueMicrotask(() => channel.emit('message', { type: 'team_response', id: message.id, ...response }));
+                callback?.();
+            };
+            const team = createTeamClient({ name, spec: pipeline, channel, onError: error => errors.push(error) });
+            clients.push(team);
+            let status = 'idle';
+            team.attach({
+                status: () => status,
+                canAcceptTask: () => status === 'idle' || status === 'completed',
+                async receiveTeamEvent(event) {
+                    events.push({ recipient: name, ...event });
+                    return true;
+                },
+                async acceptTask({ task, run }) {
+                    status = 'building';
+                    started.push(name);
+                    if (name === 'builder1') await firstGate;
+                    const job = { teamRunId: run.id, teamTask: task, request: task.description, origin: run.origin,
+                        assignment: run.assignment, assignmentVersion: run.blueprintVersion, design: run.design,
+                        dimension: run.dimension, placed: {}, removed: {}, events: [],
+                        plan: { requirements: [], steps: [] } };
+                    const tools = createBuildingTools({ team, job, world, checkpoint: async () => {} });
+                    for (const position of task.scope.positions) {
+                        await tools.call('place_block', { position, block: 'stone', partId: 'part-1', assignmentVersion: 1 });
+                    }
+                    await team.settle(job, { status: 'completed', summary: name + ' 现场 remaining=0',
+                        teamEvidence: tools.inspectTask() });
+                    status = 'completed';
+                },
+                async stop() {}
+            });
+        }
+        await until(() => started.length === 1);
+        assert.deepEqual(started, ['builder1']);
+        assert.equal(f.runtime.snapshot().tasks.find(task => task.to === 'builder2').status, 'queued');
+        assert.equal(call('lead', 'inbox').length, 0, 'entry stays asleep while stages run');
+        requests.length = 0;
+        releaseFirst();
+        await until(() => f.runtime.snapshot().tasks.every(task => task.status === 'completed'));
+        await until(() => events.some(event => event.recipient === 'builder3' && event.kind === 'task_result'));
+        assert.deepEqual(started, ['builder1', 'builder2', 'builder3']);
+        assert(!requests.some(request => request.name === 'lead'), 'all stages advance without another entry request');
+        assert(!requests.some(request => request.method === 'message'), 'completion itself delivers the handoff');
+        assert(events.some(event => event.recipient === 'builder2' && event.from === 'builder1' && event.payload.status === 'completed'));
+        assert(events.some(event => event.recipient === 'builder3' && event.from === 'builder2' && event.payload.status === 'completed'));
+        assert.deepEqual(call('lead', 'inbox').map(event => [event.from, event.kind]), [['builder3', 'task_result']]);
+        assert.equal(cells.size, 8);
+        for (const [speaker, recipient] of [['builder1', 'builder2'], ['builder2', 'builder3'], ['builder3', 'lead']]) {
+            assert(chat.some(item => item.speaker === speaker && item.text.includes('[-> ' + recipient + ']') && item.text.includes('阶段交付')));
+        }
+        assert(!chat.some(item => ['builder1', 'builder2'].includes(item.speaker) && item.text.includes('[-> lead]')));
+        assert.equal(call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
+        assert.deepEqual(errors, []);
+    } finally {
+        releaseFirst();
+        for (const client of clients) client.close();
+        f.runtime.close();
+    }
 }
+
 {
     const parallel = TEAM_PRESETS.parallel();
     const f = fixture(parallel, ':memory:', false);

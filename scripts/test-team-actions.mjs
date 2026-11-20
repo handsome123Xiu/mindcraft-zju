@@ -123,6 +123,20 @@ function fixture({ role = 'builder', othersHeld = {} } = {}) {
     assert.equal((await solo.call('query_claims')).claims !== undefined, true);
 }
 
+// 方量上限（blockLimit）：design_blueprint 生成期硬校验，超出直接拒绝，逼模型缩小设计。
+{
+    const over = createBuildingTools({ world: {
+        read: () => 'air', snapshot: () => ({ dimension: 'overworld', position: [0, 0, 4], gameMode: 'creative' }), async prepare() {}
+    }, job: { origin: [0, 0, 0], dimension: 'overworld', owner: 'user', placed: {}, removed: {}, placementAttempts: 0,
+        assignmentVersion: 0, plan: { requirements: [{ id: 'goal', description: 'x' }], steps: [] }, events: [] },
+        team: { self: 'lead', runtime: false, spec: () => ({ coordination: 'relationships', entryAgent: 'lead',
+            agents: { lead: { role: 'lead' } }, edges: [], blockLimit: 10 }) },
+        design: async ({ origin }) => ({ blueprint: compileBlueprint({ shapes: [{ kind: 'box', part: 'floor', min: [0, 0, 0], max: [4, 0, 4], block: 'stone' }] }, origin),
+            shapes: [{ kind: 'box', min: [0, 0, 0], max: [4, 0, 4], block: 'stone' }], summary: '超限',
+            coverage: [{ requirementId: 'goal', evidence: 'x' }] }) });
+    await assert.rejects(over.useSkill('design_blueprint', {}), /超过 10 的上限/);
+}
+
 // 团队生命周期事件进短 teamFeed 而不是聊天窗口；真人消息仍进 messages 且更紧凑。
 {
     const { createBuildingLoop } = await import('../src/building/loop-agent.js');

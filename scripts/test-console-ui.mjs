@@ -11,6 +11,7 @@ import { migrateTeamSpec } from '../src/building/team-migration.js';
 import { validateTeamSpec, TEAM_PRESETS } from '../src/building/team-state.js';
 import { TOOL_CATALOG } from '../src/building/tools.js';
 import { ACTION_SCHEMAS } from '../src/building/action-protocol.js';
+import { preserveTaskDependencies } from '../console/team-config.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const out = await mkdtemp(join(tmpdir(), 'mindcraft-ui-shots-'));
@@ -40,7 +41,11 @@ const server = createServer(async (req, res) => {
         }
         if (path === '/api/team/runtime') value = { running: false, agents: [], tasks: [], proposals: [], claims: {}, runs: [] };
         if (path === '/api/team') {
-            if (req.method === 'POST') { assert(validateTeamSpec(data.spec).ok); saved = data.spec; }
+            if (req.method === 'POST') {
+                const reconciled = preserveTaskDependencies(data.spec, saved);
+                assert(validateTeamSpec(reconciled.spec).ok);
+                saved = reconciled.spec;
+            }
             value = { spec: saved, validation: saved ? validateTeamSpec(saved) : { ok: true, errors: [] }, claims: { claims: {} } };
         }
         if (path === '/api/team/migrate') value = { spec: migrateTeamSpec(data.spec) };
@@ -106,7 +111,7 @@ try {
         'voting', 'peers', 'handoff', 'blackboard', 'swarm'];
     assert.deepEqual(await evaluate("[...document.querySelectorAll('[data-preset]')].map(button => button.dataset.preset)"), modes);
     const edgesByMode = { pipeline: 5, centralized: 3, router: 4, competitive: 2, parallel: 3,
-        voting: 3, peers: 3, handoff: 2, blackboard: 3, swarm: 5 };
+        voting: 7, peers: 3, handoff: 2, blackboard: 3, swarm: 5 };
     for (const mode of [...modes.filter(mode => mode !== 'centralized'), 'centralized']) {
         saved = null;
         await call('Page.navigate', { url });
@@ -138,6 +143,27 @@ try {
         assert.equal(saved.blueprintMode, template.blueprintMode);
         await call('Page.reload');
         await until(() => evaluate(`document.querySelectorAll('#teamCanvas g').length === ${memberCount}`), 'Saved preset did not survive reload');
+        const restored = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
+        for (const name of names) {
+            assert.equal(restored.agents[name].taskReportTo, template.agents[name].taskReportTo);
+            assert.equal(restored.agents[name].taskAfter, template.agents[name].taskAfter);
+        }
+        if (mode === 'pipeline') {
+            // Simulate an already-open old page dropping newly introduced fields.
+            await evaluate(`(async () => {
+                const old = JSON.parse(document.querySelector('#teamEditor').value);
+                for (const node of Object.values(old.agents)) delete node.taskAfter;
+                const response = await fetch('/api/team', {method:'POST', body:JSON.stringify({spec:old})});
+                if (!response.ok) throw new Error('old-page save failed');
+            })()`);
+            assert.equal(saved.agents.builder2.taskAfter, 'builder1');
+            assert.equal(saved.agents.builder3.taskAfter, 'builder2');
+            await call('Page.reload');
+            await until(() => evaluate("!!document.querySelector('#teamEditor').value && JSON.parse(document.querySelector('#teamEditor').value).agents.builder3?.taskAfter === 'builder2'"), 'Old-page save erased stage dependencies');
+            await evaluate("(() => { const editor = document.querySelector('#teamEditor'); const spec = JSON.parse(editor.value); spec.agents.builder3.taskAfter = null; editor.value = JSON.stringify(spec); editor.dispatchEvent(new Event('blur')); document.querySelector('#teamEntry').dispatchEvent(new Event('change')); })()");
+            await click('#applyCanvas');
+            await until(() => saved.agents.builder3.taskAfter === null, 'Explicit prerequisite removal must remain possible');
+        }
     }
     assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), 3);
     assert.equal(await evaluate("!!document.querySelector('#edgeTypeSelect')"), false);

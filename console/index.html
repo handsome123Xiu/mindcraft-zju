@@ -166,6 +166,9 @@
         <div><label>伙伴档案路径（可选）</label><input id="nodeProfile" placeholder="andy.json 或 profiles/xxx.json"></div>
         <div><label>团队入口（接收目标、设计和最终验收）</label><select id="teamEntry"></select></div>
       </div>
+      <div class="row" style="margin-top:10px">
+        <div><label>方块数量上限（可选，竞争约束）</label><input id="blockLimit" type="number" min="1" max="2000000" placeholder="例如 200；留空不限制"></div>
+      </div>
       <label>这位伙伴负责什么？</label><textarea id="nodeInstructions" rows="2" maxlength="2000" placeholder="例如：优先处理地基和墙体，遇到阻碍报告具体坐标。"></textarea>
       <p class="hintbox" style="margin-top:10px">连线允许双方协作，关系说明决定如何配合；角色名和关系文字不会授予权限。选中成员后勾选可用工具。任务顺序需由 Agent 登记依赖；文字中的审批或投票约定不等于强制执行门槛。保存修改对新工程生效。</p>
       <p id="canvasValidation" class="muted" style="margin:8px 0 0"></p>
@@ -711,6 +714,11 @@ for (const [id, key] of [['nodeProfile', 'profile'], ['nodeInstructions', 'instr
   };
 }
 $('#teamEntry').onchange = () => { graph.entryAgent = $('#teamEntry').value; syncToEditor(); markDirty(); };
+$('#blockLimit').onchange = () => {
+  const value = String($('#blockLimit').value ?? '').trim();
+  graph.blockLimit = value === '' ? undefined : Number(value);
+  syncToEditor(); markDirty();
+};
 $('#edgeDescription').oninput = () => {
   if (selected?.type !== 'edge') return;
   graph.edges[selected.index].description = $('#edgeDescription').value;
@@ -760,7 +768,10 @@ function graphToSpec() {
   return {
     coordination: 'relationships',
     ...(graph.blueprintMode ? { blueprintMode: graph.blueprintMode } : {}),
+    ...(Number.isInteger(graph.blockLimit) && graph.blockLimit > 0 ? { blockLimit: graph.blockLimit } : {}),
     agents: Object.fromEntries(Object.entries(graph.agents).map(([name, a]) => [name, { role: a.role ?? 'builder',
+      ...(a.taskReportTo ? { taskReportTo: a.taskReportTo } : {}),
+      ...(a.taskAfter !== undefined ? { taskAfter: a.taskAfter } : {}),
       ...(a.profile ? { profile: a.profile } : {}), ...(a.instructions ? { instructions: a.instructions } : {}),
       ...(a.permissions ? { permissions: a.permissions } : {}), position: { x: a.x, y: a.y } }])),
     ...(graph.entryAgent && graph.agents[graph.entryAgent] ? { entryAgent: graph.entryAgent } : {}),
@@ -780,10 +791,10 @@ function specToGraph(spec) {
   const rect = svg.getBoundingClientRect();
   const names = Object.keys(spec.agents);
   const perRow = Math.ceil(Math.sqrt(names.length));
-  graph = { coordination: 'relationships', entryAgent: spec.entryAgent, blueprintMode: spec.blueprintMode,
+  graph = { coordination: 'relationships', entryAgent: spec.entryAgent, blueprintMode: spec.blueprintMode, blockLimit: spec.blockLimit,
     edges: (spec.edges ?? []).map(({ from, to, description, label, note }) => ({ from, to, description, ...(label ? { label } : {}), ...(note ? { note } : {}) })),
     agents: Object.fromEntries(names.map((name, i) => [name, {
-      profile: spec.agents[name].profile, instructions: spec.agents[name].instructions,
+      profile: spec.agents[name].profile, instructions: spec.agents[name].instructions, taskReportTo: spec.agents[name].taskReportTo, taskAfter: spec.agents[name].taskAfter,
       role: spec.agents[name].role ?? 'builder',
       permissions: spec.agents[name].permissions ? structuredClone(spec.agents[name].permissions) : undefined,
       x: spec.agents[name].position?.x ?? (rect.width || 800) / 2 + (i % perRow - (perRow - 1) / 2) * 140,
@@ -797,6 +808,7 @@ function syncToEditor() {
   const names = agentNames();
   $('#teamEntry').replaceChildren(...names.map(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; return option; }));
   $('#teamEntry').value = graph.entryAgent ?? names.find(name => ['lead'].includes(graph.agents[name].role) || graph.agents[name].permissions?.finishGate) ?? names[0] ?? '';
+  $('#blockLimit').value = graph.blockLimit ?? '';
 }
 $('#teamEditor').onblur = () => {
   try { specToGraph(JSON.parse($('#teamEditor').value)); markDirty(); }
@@ -807,12 +819,12 @@ $('#toggleJson').onclick = () => {
   block.style.display = block.style.display === 'none' ? 'block' : 'none';
 };
 const PRESET_POSITIONS = {
-  pipeline: [[0.5, 0.22], [0.16, 0.50], [0.5, 0.65], [0.84, 0.77]],
+  pipeline: [[0.5, 0.18], [0.16, 0.72], [0.5, 0.72], [0.84, 0.72]],
   centralized: [[0.5, 0.23], [0.26, 0.72], [0.74, 0.72]],
   router: [[0.5, 0.18], [0.14, 0.72], [0.38, 0.78], [0.62, 0.78], [0.86, 0.72]],
   competitive: [[0.5, 0.24], [0.24, 0.72], [0.76, 0.72]],
   parallel: [[0.5, 0.23], [0.18, 0.72], [0.5, 0.72], [0.82, 0.72]],
-  voting: [[0.5, 0.22], [0.18, 0.67], [0.5, 0.80], [0.82, 0.67]],
+  voting: [[0.5, 0.16], [0.12, 0.50], [0.37, 0.50], [0.63, 0.50], [0.88, 0.50], [0.25, 0.76], [0.50, 0.76], [0.75, 0.76]],
   peers: [[0.5, 0.23], [0.24, 0.73], [0.76, 0.73]],
   handoff: [[0.25, 0.23], [0.25, 0.60], [0.76, 0.74]],
   blackboard: [[0.5, 0.22], [0.18, 0.55], [0.82, 0.55], [0.5, 0.81]],
@@ -855,7 +867,8 @@ $('#loadCentralizedExample').onclick = () => choosePreset($('[data-preset=centra
 $('#applyCanvas').onclick = async () => {
   try {
     const spec = JSON.parse($('#teamEditor').value);
-    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec, profile: $('#profileSelect').value || null }) });
+    const saved = await api('/api/team', { method: 'POST', body: JSON.stringify({ spec, profile: $('#profileSelect').value || null }) });
+    if (saved.spec) { specToGraph(saved.spec); syncToEditor(); }
     markClean('已保存 ✓ 新结构对下次启动团队生效');
     loadTeam(true);
   } catch (error) { toast(error.message); }
@@ -880,7 +893,8 @@ async function startTeam(fresh) {
   try {
     const spec = JSON.parse($('#teamEditor').value);
     const profile = $('#profileSelect').value || null;
-    await api('/api/team', { method: 'POST', body: JSON.stringify({ spec, profile }) });
+    const saved = await api('/api/team', { method: 'POST', body: JSON.stringify({ spec, profile }) });
+    if (saved.spec) { specToGraph(saved.spec); syncToEditor(); }
     markClean('团队定义已保存');
     const result = await api('/api/team/start', { method: 'POST', body: JSON.stringify({ fresh, port: Number($('#mcPort').value) || null, profile }) });
     toast('团队已启动，向 ' + result.entryAgent + ' 发送任务');

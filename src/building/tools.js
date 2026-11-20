@@ -328,6 +328,13 @@ export function createBuildingTools({ world, job, design, checkpoint, onProgress
             });
             const candidate = { version: 1, dimension: job.dimension, blueprint: proposed.blueprint,
                 planning: { source: 'skill', skill: name, model: job.model, request: job.request, origin } };
+            // 竞争等范式的方量上限：生成蓝图时即硬校验，超出上限直接拒绝，逼模型缩小设计。
+            const blockLimit = team?.spec?.()?.blockLimit;
+            if (blockLimit && candidate.blueprint.blocks.length > blockLimit) {
+                throw Object.assign(new Error('蓝图 ' + candidate.blueprint.blocks.length + ' 个方块，超过 ' + blockLimit + ' 的上限，请缩小设计'), {
+                    code: 'BLOCK_LIMIT', field: 'shapes', expected: { blockLimit, blocks: candidate.blueprint.blocks.length }
+                });
+            }
             if (assignedSite && ![candidate.blueprint.bounds.min, candidate.blueprint.bounds.max].every(pos => containsPosition(assignedSite.region, pos))) {
                 throw Object.assign(new Error('蓝图及预留空位必须在自己的工地内，请缩小或调整形状'), {
                     code: 'SITE_BOUNDS', field: 'shapes', expected: assignedSite

@@ -91,9 +91,21 @@ export function validateTeamSpec(spec) {
         }
         if (entry?.profile != null && (typeof entry.profile !== 'string' || !entry.profile.endsWith('.json'))) errors.push(name + ' 的 profile 必须为 JSON 文件路径');
         if (entry?.position != null && (!Number.isFinite(entry.position.x) || !Number.isFinite(entry.position.y))) errors.push(name + ' 的画布坐标无效');
+        if (entry?.taskReportTo != null && (!names.includes(entry.taskReportTo) ||
+            !Array.isArray(spec.edges ?? []) || !edgeAllows(spec, name, entry.taskReportTo))) errors.push(name + ' 的 taskReportTo 必须指向有连线的其他成员');
+        if (entry?.taskAfter != null && (!names.includes(entry.taskAfter) ||
+            !Array.isArray(spec.edges ?? []) || !edgeAllows(spec, name, entry.taskAfter))) errors.push(name + ' 的 taskAfter 必须指向有连线的前序成员');
+        const predecessors = new Set([name]);
+        let previous = entry?.taskAfter;
+        while (previous && names.includes(previous)) {
+            if (predecessors.has(previous)) { errors.push(name + ' 的 taskAfter 存在依赖环'); break; }
+            predecessors.add(previous);
+            previous = spec.agents[previous]?.taskAfter;
+        }
         if (entry?.instructions != null && (typeof entry.instructions !== 'string' || entry.instructions.length > 2000)) errors.push(name + ' 的职责说明无效');
     }
     if (spec?.blueprintMode != null && spec.blueprintMode !== 'independent') errors.push('未知 blueprintMode');
+    if (spec?.blockLimit != null && (!Number.isInteger(spec.blockLimit) || spec.blockLimit < 1 || spec.blockLimit > 2000000)) errors.push('blockLimit 必须是 1–2000000 的整数');
     if (spec?.entryAgent && !names.includes(spec.entryAgent)) errors.push('团队入口必须是已有成员');
     if (!Array.isArray(spec?.edges ?? [])) return { ok: false, errors: [...errors, 'edges 必须是数组'] };
     for (const [index, edge] of (spec?.edges ?? []).entries()) {
@@ -145,21 +157,30 @@ export function validateTeamSpec(spec) {
 }
 
 // ---- 预设模板：角色约定写进 agents[name].instructions，连线和权限单独配置 ----
+const COMPETITION_BLOCK_LIMIT = 200; // 竞争择优：每位候选的方块数量上限（生成蓝图时硬校验）
 const PRESET_INSTRUCTIONS = {
     pipeline: {
         entry: stages => [
-            '你负责固定施工流水线：' + stages.join(' → ') + '。观察场地，发布一份共享蓝图。按建筑实际部件划分基底、主体和收尾；简单建筑可用三个连续区段。三个阶段各有可核验、互不重叠的范围，前序留下的支撑或边界应能现场检查。',
-            '按工序为三人分别调用 delegate_task。首段可直接领取；后两项各用 dependsOn 引用上一条委托返回的 taskId。任务描述写清阶段、部件、范围和开工条件，引用已发布的蓝图版本。材料以当前蓝图的方块 ID 为准，任务描述里避免复述未经核对的材质或坐标。登记完整任务链后用 wait_for_team 等待。',
-            '若有阻塞，用 list_tasks 查看是哪个阶段，条件恢复后用 reassign_task 恢复原任务，保留其下游依赖。最后一段完成且所有前序已结算，再按原要求和现场结果整体核验并 finish。'
+            '你负责固定施工流水线：' + stages.join(' → ') + '。观察场地，用 design_blueprint 发布共享蓝图，将建筑按实际工序切成与成员数相同的连续阶段。各阶段范围互不重叠，前序留下的支撑或边界应能现场核验。派工前移到工地与通道外。',
+            '发布蓝图后，先观察蓝图 bounds 外至少 3 格的安全待命点，为每名 Builder 指定互不占用的位置。用 send_message 各发送一次【工地待命】，写明完整建筑边界和本人的待命点；成员确认到位后再派工。准备期间用 wait_for_user，reason 以【等队友】开头，收到到位确认后继续。待命成员停留在工地外。',
+            '按流水线顺序一次性为所有阶段调用 delegate_task，整部件用 partIds，切分连续区域用 scope.region。运行时会依据每名成员的 taskAfter 自动添加上一段任务依赖；若显式填写 dependsOn，用实际返回的 taskId。登记后核对整条链。描述写清本段范围、前序支撑及验收条件。前序 complete_task 结算后，下一段自动领取并施工。',
+            '恢复已有工程时，先查看已登记任务和现场进度，沿用现版蓝图和原任务。全部登记后 wait_for_team。阶段交接由 Builder 的 complete_task 自动送给其 taskReportTo，接收方自动领取已登记的下一段。中间阶段正常交付无需你放行；收到具体阻塞求助时核对原因，只对 blocked 原任务用 reassign_task 恢复，不能重派已 completed 的阶段。',
+            '收到末段完成交付后，单独 inspect_build 复检全场。若零差异且全部子任务 completed，单独 update_plan 把剩余步骤标 done 并写现场证据；下一动作单独 finish，requirementReview 按原始要求填写 requirementId、satisfied=true 和 evidence。finish 会再次现场核验。已有零差异证据且全部计划 done 时直接 finish，不重复 inspect_build 或改写同一份 done 计划。'
         ].join('\n'),
-        stage: (index, previous, next) => [
-            '你负责流水线第 ' + (index + 1) + ' 段。收到正式任务后按 partIds 和 workScope 施工。' +
-                (previous ? '先核对 ' + previous + ' 的阶段完成记录与现场支撑。聊天交接用于了解现场，正式任务是开工依据。若仅在协调回合收到交接消息，简短确认并 end_turn 等放行。' : '按任务要求完成后续工序需要的首段支撑或边界。'),
-            '领取或重派时，用 inspect_part 检查当前委托范围。材料、坐标和版本以该工具返回的已发布蓝图为准；任务描述或旧计划里的别名、翻译和推测，仅用于理解任务。',
-            '已有可执行的 suggestions.actions 时，在下一步直接执行当前范围内的建议，保留原样的 block、坐标、partId、assignmentVersion。若没有建议，按 differences 中的实际缺失格和精确材料调用合适的放置工具，先建有支撑的格。施工后再复查；若工具报错，按具体错误调整。',
-            '现场核验本段后，' + (next ? '用 send_message 直接向 ' + next + ' 交接验收结果、边界或支撑位置，提醒对方等正式放行。' : '向入口说明最后一段结果和整体验收要注意的位置。'),
-            '用 complete_task 提交本段结果。若支撑或现场条件不符，报告准确坐标、现状和期望状态。'
-        ].join('\n')
+        stage: (index, previous, next, lead) => {
+            const recipient = next ?? lead;
+            const predecessor = previous ? '上游是 ' + previous + '。' : '你是首段，没有上游依赖。';
+            return [
+                '你负责流水线第 ' + (index + 1) + ' 段。' + predecessor + '本段交付对象是 ' + recipient + '。在正式施工任务中，team.assignment.id 表示你已领取任务，依赖已经满足；用 update_plan 制定本段步骤（每步含 id、title、success），核对现场后直接施工。',
+                '收到【工地待命】时，观察指定位置的安全空间，用 fly_to 或 move_to 移到建筑边界外的本人待命点；向发送者确认一次到位后直接 end_turn。后续待命期间保持原位。工序以运行时的 dependsOn 和任务领取为准。前序 complete_task 会自动结算并交付。协调回合尚未领取施工任务时，收到阶段消息就直接 end_turn，让客户端自动领取可开工任务；聊天中的“等待放行”不增加开工条件。已领取任务后按本段 workScope 连续施工。',
+                '若上游交付状态是 blocked，这不是完成交付。把上游任务 ID 和具体阻塞原因向 ' + lead + ' 转达一次，然后 end_turn；由入口恢复原任务，自己继续等依赖，不轮询、不提前施工。',
+                '用 inspect_part 查看自己 workScope 的实际差异、材料和坐标，以已发布蓝图为准。有 suggestions.actions 就直接执行，保留原样 block、坐标、partId、assignmentVersion；否则按 differences 的缺失格和精确材料放置，先建有支撑的格。施工后复查，工具报错按具体错误调整。',
+                '遇到 entity_in_way 时读取工具给出的 blockers 名称和坐标，向实际挡路者请求一次移动到其工地外待命点；跨连线由相邻成员转达。对同一障碍只发一次请求，收到移动结果或观察到位置改变再重试。有 missing_reference 时核对相邻支撑；真正受阻时用 blocked 提交具体障碍。已有 inspect_part 建议且现场条件满足时，下一步直接执行建议。',
+                '本段完工后，先移到蓝图完整 bounds 外至少 3 格的安全待命点，再现场核验并 complete_task，让出后续施工区域。',
+                '现场自检全部通过后，用 update_plan 标记本段步骤 done 并附证据，然后 complete_task。summary 写清蓝图版本、完成部件、现场 remaining=0、支撑与边界及下一步注意事项。运行时会把这份结果直接交给 ' + recipient + '。' +
+                    (next ? '你在此结束本段，下游依赖自动解除，由 ' + next + ' 接续施工。' : '这是整条流水线的最后交付，由 ' + lead + ' 对全场进行最终检查。')
+            ].join('\n');
+        }
     },
     centralized: {
         entry: [
@@ -254,26 +275,27 @@ const PRESET_INSTRUCTIONS = {
     },
     competitive: {
         entry: (candidates) => [
-            '你是竞争评选的 Lead。更新整体计划并先观察场地。用 send_message 分别给 ' + candidates.join(' 和 ') +
-            ' 发同一份【方案征集】，包含用户原始要求的关键约束、同一场地摘要和评选标准；整条征集尽量在 160 字内。先确认候选可接收协调消息。每位候选独立回复一次；不要向候选转发另一份提案。征集阶段先不设计或发布蓝图，也不派施工任务。',
-            '根据团队消息的发送者识别提案。同一候选只收一份有效提案。两份到齐就自主评选。尚有缺案时，向用户简短报告进度，然后调用 wait_for_user，reason 以【等队友】开头。新提案会恢复本轮评选，先查看新回复，勿重复征集。用户真实需求有待确认时使用普通原因。',
-            '用同一标准比较：先核对用户硬性要求，排除不符合者；再比较场地适配、支撑与通行风险，最后比较施工复杂度。选一个可行方案，不拼接候选方案。同等条件下优先施工更简单者；仍相同按征集顺序选。都不可行时说明缺口，向用户确认后再处理。',
-            '把胜出者、采用的方案和选择理由记录到计划证据，并向用户说明。随后用 design_blueprint 将胜出方案转成符合原始要求的共享蓝图。蓝图发布后用 delegate_task 把全部未完成范围交给胜出者；其余候选不施工。',
-            '等待胜出者完成施工，仅在其可恢复时重派给同一成员。胜出者无法继续时先告知用户，由用户决定下一步。最后按用户原始要求和现场证据验收，再用 finish 汇报。'
+            '你是竞争择优的 Lead。更新整体计划并观察场地。用 delegate_site 给 ' + candidates.join(' 和 ') + ' 各划一块独立工地：两块工地水平并列、面积相近，origin 分别落在各自工地内，工地大小按用户要求估算。把同一份用户原始要求原样交给两位候选，不指定建筑形状、材质或内部做法。',
+            '派工前核对站位，若占用工地或通路，先移到范围外再派工。派工后用 wait_for_team 等事件；两位候选会各自独立设计蓝图并在本工地施工。你全程不设计、不发布蓝图，也不生成共享蓝图或追加施工委托。',
+            '两位候选都完成施工后，用 inspect_build 分别核对两处现场，再按同一套标准逐项评分：统一 4 项各 5 分（满分 20）——①硬性要求符合度（结构/尺寸/功能是否满足用户原始要求）②美观与比例 ③材料搭配与层次 ④支撑稳固与方量效率。先给两位候选逐项打分并算出各自总分，把每项分数和总分都记录到计划证据，作为下面比较结论的依据。',
+            '比较必须给出明确胜负。胜出者即总分高者，用 send_message 向玩家真正发出结论（recipient 留空即默认发给玩家；不能只把结论写进计划证据或 finish 就跳过发送）。text 只用一行，且必须以「胜出者：」开头：先写胜出者与双方总分对比，再写一句比较理由和一处现场证据。例：胜出者 candidate_a（17 分 > 15 分），理由：比例更经典、三色层次分明；证据：两处 inspect_build 均 0 差异。不要用换行或制表符；若工具报「控制字符」，删掉换行和制表符后用更短一行重发。只有 send_message 反复失败时，才退而把同一句「胜出者：…」结论写进 finish 的 summary，且 summary 仍须以胜负结论开头，不能只罗列双方做了什么。',
+            '若一处未完成或明显不符要求，说明具体差异后仍须按可比较的评分给出结论，或向用户报告缺口。最后按用户原始要求整体验收，再调用 finish 汇报（summary 同样只用一行、以胜负结论开头）。'
         ].join('\n'),
         member: (lead) => [
-            '收到 ' + lead + ' 的【方案征集】时，在协调回合根据 TEAM_GOAL、征集中的补充要求和同一场地摘要独立提出一份建筑方案。只给 Lead 发一条【参赛方案】消息，不超过 160 字，包含布局或关键尺寸、材料、工序和主要风险，然后 end_turn。无法满足某个硬要求时直接说明，勿假定场地条件。',
-            '只有在收到 Lead 发来的正式施工委托时，才按共享蓝图和任务范围实施胜出的方案。施工完成后核验现场并 complete_task 汇报。其他消息在协调回合处理，未获正式施工委托时不施工。'
+            '你是在独立工地参赛的候选。收到 ' + lead + ' 的工地委托后，读取 team.assignment.site 的世界坐标 region 和 origin，核对自己的地面支撑与空间，用 update_plan 制定本建筑的方案。',
+            '本次竞争限制：本建筑最多使用 ' + COMPETITION_BLOCK_LIMIT + ' 个方块。调用 design_blueprint 发布蓝图时必须把方块数控制在该上限内，超出会直接报错，请缩小设计后再发。',
+            '设计原点是委托的 origin，所有建筑方块与有意保留的空位都要落在本工地。发布蓝图后通过 inspect_part 和施工工具完成本建筑。',
+            '核验自己整座建筑，标记计划完成，再用 complete_task 向 ' + lead + ' 提交建筑特征和现场证据。若发现边界或支撑条件无法满足原始要求，报告具体坐标和原因。'
         ].join('\n')
     },
     voting: {
         entry: (voters) => [
             '你主持 A/B 多数投票，自己不投票。更新整体计划并观察场地。选一个确实影响建筑、且用户尚未确定的决策，给出两个可行且符合用户硬性要求的备选。通过 send_message 向 ' + voters.join('、') +
             ' 分别发送同一份【征集投票#1】，写清 A、B 各代表什么、场地证据和相关用户约束；把关键内容放在前 160 字。不得在同一轮改变选项或转发其他人的票。确定结果前不发布蓝图或派工。',
-            '只按团队消息的真实发送者计票。同一轮每位指定成员只计第一张有效 A/B 票，重复票、上一轮选票、弃权和无效回复不计。两票投同一选项即为多数，可直接采用该选项；不得用自己的偏好改票或决定胜负。',
-            '尚无多数且仍缺回复时，先用 send_message 向玩家发一句单行进度，再单独调用 wait_for_user，reason 以【等队友】开头。征集投票期间尚无施工任务，wait_for_team 无法等到选票。新票会自动恢复本轮计票。按原轮次去重；若全员已回复却无多数，先说明原因，必要时用新轮次征集。',
-            '把票数、胜出选项和设计依据记录在计划证据。发布蓝图前用 send_message 向玩家公布单行结果，含两边票数和采用的设计。例如【投票#1结果】A 得 3 票，B 得 0 票。采用 A，建砂岩三层金字塔并加金块塔尖。',
-            '发给玩家的 text 只用一行；用句号或空格分隔要点。若工具报控制字符，先移除换行和制表符，再用一行简短结果重发。送出后单独调用 design_blueprint 落实胜出选项。几何格式错误时修正几何并保留投票选择；现场证实该选项不可实施时说明原因并重新表决。',
+            '只按团队消息的真实发送者计票。同一轮每位指定成员只计第一张有效 A/B 票，重复票、上一轮选票、弃权和无效回复不计。比较两案各自的有效票数，票数多的一侧胜出并优先采用；不得用自己的偏好改票或决定胜负。',
+            '尚有成员未回复时，先用 send_message 向玩家发一句单行进度，再单独调用 wait_for_user，reason 以【等队友】开头，例：「【等队友】正在等 7 名成员回投 A/B」。征集投票期间尚无施工任务，wait_for_team 无法等到选票；新票会自动唤醒本轮。若 wait_for_user 报「请先用 send_message 回复」，说明刚有新票到账：先读票计票，再发一句最新进度并重发 wait_for_user。全员已回复就立即计票并公布结果，不要继续空等；若两案票数持平（平票），先说明原因，必要时用新轮次征集。',
+            '把票数、胜出选项和设计依据记录在计划证据。发布蓝图前用 send_message 向玩家公布单行结果，含两边票数和采用的设计。例如【投票#1结果】A 得 5 票，B 得 2 票。采用 A，建砂岩三层金字塔并加金块塔尖。',
+            '发给玩家的 text 只用一行；用句号或空格分隔要点。若工具报控制字符，先移除换行和制表符，再用一行简短结果重发。公布结果后，下一个动作必须单独调用 design_blueprint（skill）落实胜出选项，不要再反复 update_plan 复述已公布的结果。args.brief 写清胜出设计的尺寸、材质与层级，args.origin 用已观察到的施工原点。几何格式错误时修正几何并保留投票选择；现场证实该选项不可实施时说明原因并重新表决。',
             '蓝图发布后先核对返回的 bounds，必要时用 inspect_blueprint 检查关键格子。确保胜出特征落实在实际蓝图里，并用现场观测确认最低施工层有支撑；若实际位置、支撑或票选特征不符，说明差异和现场证据，先暂停派工。核对通过后，用一次 delegate_task 把全部未完成施工范围交给一名就绪成员。派工前查 team.agents，只选 online=true 且 canAcceptTask=true 的成员；投票内容不影响施工资格。等待该成员完成，再结合原始要求和现场结果 finish。'
         ].join('\n'),
         member: (lead) => [
@@ -337,18 +359,22 @@ function debatingPreset(names = ['arch_1', 'arch_2', 'arch_3']) {
         relation(from, to, '协商互助', `${from} 与 ${to} 平等协商，根据能力分担工作。需要帮助时说明范围，达成一致后登记任务或交接；避免重复施工。`)));
 }
 function pipelinePreset(names = ['lead', 'builder1', 'builder2', 'builder3']) {
-    requireMembers(names, 4, '流水线');
+    if (!Array.isArray(names) || names.length < 3 || new Set(names).size !== names.length ||
+        names.some(name => typeof name !== 'string' || !name)) {
+        throw new Error('流水线预设需要至少一位 lead 和两位 builder（共 ≥3 位不同成员）');
+    }
     const [lead, ...stages] = names;
     const instructions = PRESET_INSTRUCTIONS.pipeline;
     return teamSpec(lead, {
         [lead]: coordinator(instructions.entry(stages)),
         ...Object.fromEntries(stages.map((name, i) => [name,
-            scopedBuilder(instructions.stage(i, stages[i - 1], stages[i + 1]), 'stage_builder')]))
+            { ...scopedBuilder(instructions.stage(i, stages[i - 1], stages[i + 1], lead), 'stage_builder'),
+                taskReportTo: stages[i + 1] ?? lead, ...(stages[i - 1] ? { taskAfter: stages[i - 1] } : {}) }]))
     }, [
         ...stages.map((name, i) => relation(lead, name, '第 ' + (i + 1) + ' 段委托',
-            lead + ' 登记本段任务和前置任务 ID，' + name + ' 现场验收后正式结算。')),
+            lead + ' 在开工前一次性登记本段范围与依赖。' + name + ' 领取任务即按前序成果施工，完成后通过 complete_task 交给 ' + (stages[i + 1] ?? lead) + '。')),
         ...stages.slice(1).map((name, i) => relation(stages[i], name, '阶段交接',
-            stages[i] + ' 直接说明现场验收结果和续接条件，' + name + ' 在任务依赖满足后正式开工。'))
+            stages[i] + ' 用 complete_task 交付现场验收结果与续接条件，运行时直接通知 ' + name + ' 并解除下一段依赖；' + name + ' 自动领取任务，核对现场后开工。'))
     ]);
 }
 function parallelPreset(names = ['lead', 'builder1', 'builder2', 'builder3']) {
@@ -458,33 +484,33 @@ function routerPreset(names = ['router', 'builder_1', 'builder_2', 'builder_3', 
 }
 
 function competitivePreset(names = ['lead', 'candidate_a', 'candidate_b']) {
-    if (!Array.isArray(names) || names.length !== 3 || new Set(names).size !== 3 ||
-        names.some(name => typeof name !== 'string' || !name)) {
-        throw new Error('竞争择优预设需要一位 Lead 和两位不同的候选');
-    }
+    requireMembers(names, 3, '竞争择优');
     const [lead, ...candidates] = names;
     const instructions = PRESET_INSTRUCTIONS.competitive;
+    const entry = coordinator(instructions.entry(candidates));
+    entry.permissions.allow = entry.permissions.allow.filter(name => !['design_blueprint', 'delegate_task'].includes(name));
+    entry.permissions.allow.push('delegate_site');
     return {
-        coordination: 'relationships',
-        entryAgent: lead,
-        agents: {
-            [lead]: coordinator(instructions.entry(candidates)),
+        ...teamSpec(lead, {
+            [lead]: entry,
             ...Object.fromEntries(candidates.map(name => [name, {
                 role: 'candidate',
-                permissions: { deny: ['design_blueprint', 'delegate_task', 'prepare_parallel_build',
-                    'propose_task_share', 'respond_task_share', 'commit_task_share'] },
+                permissions: { deny: [
+                    'delegate_site', 'delegate_task', 'prepare_parallel_build', 'reassign_task', ...NO_SHARE
+                ] },
                 instructions: instructions.member(lead)
             }]))
-        },
-        edges: candidates.map(candidate => ({ from: lead, to: candidate, label: '独立提案与择优',
-            description: lead + ' 发统一的征集条件，' + candidate + ' 独立提交给 Lead；评选结束后仅胜出者接收正式施工委托。' }))
+        }, candidates.map(candidate => relation(lead, candidate, '竞争工地与择优',
+            lead + ' 划出独立工地并给出统一方量限制。' + candidate + ' 在本工地独立设计并施工，完成后 ' + lead + ' 现场检查并评选更优者。'))),
+        blueprintMode: 'independent',
+        blockLimit: COMPETITION_BLOCK_LIMIT
     };
 }
 
-function votingPreset(names = ['lead', 'voter_1', 'voter_2', 'voter_3']) {
-    if (!Array.isArray(names) || names.length !== 4 || new Set(names).size !== 4 ||
+function votingPreset(names = ['lead', 'voter_1', 'voter_2', 'voter_3', 'voter_4', 'voter_5', 'voter_6', 'voter_7']) {
+    if (!Array.isArray(names) || names.length !== 8 || new Set(names).size !== 8 ||
         names.some(name => typeof name !== 'string' || !name)) {
-        throw new Error('多数投票预设需要一位 Lead 和三位不同的投票者');
+        throw new Error('多数投票预设需要一位 Lead 和七位不同的投票者');
     }
     const [lead, ...voters] = names;
     const instructions = PRESET_INSTRUCTIONS.voting;

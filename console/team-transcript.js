@@ -75,11 +75,16 @@ export function createTeamTranscript({ snapshot, log, notify }) {
                 }
                 return;
             case 'take_task':
-                if (task) return address(dispatcher, taskLine('领工', task), 'start:' + task.id + ':' + task.attempt);
+                if (task) {
+                    const key = 'start:' + task.id + ':' + task.attempt;
+                    if (task.reportTo) return speak(taskLine('领工', task), key);
+                    return address(dispatcher, taskLine('领工', task), key);
+                }
                 return;
             case 'task_result':
                 if (task && taskStatus[result.status]) {
-                    return address(dispatcher, taskLine(taskStatus[result.status], task) + ' ' + task.summary,
+                    const label = task.reportTo && result.status === 'completed' ? '阶段交付' : taskStatus[result.status];
+                    return address(task.reportTo ?? dispatcher, taskLine(label, task) + ' ' + task.summary,
                         'result:' + task.id + ':' + task.attempt + ':' + result.status);
                 }
                 return;

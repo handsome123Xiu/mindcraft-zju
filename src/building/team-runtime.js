@@ -119,9 +119,12 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
     };
     const report = (state, task, kind, detail = {}) => {
         const run = state.runs[task.runId];
-        const recipients = new Set([run.root, task.from, dispatcher(state, task)]);
+        // An explicit report route hands workflow events directly to the next member.
+        // Claims stay visible on the task board without waking the result recipient.
+        if (task.reportTo && kind === 'task_started') return;
+        const recipients = new Set(task.reportTo ? [task.reportTo] : [run.root, task.from, dispatcher(state, task)]);
         let parent = state.tasks[task.parentId];
-        while (parent) { recipients.add(parent.to); parent = state.tasks[parent.parentId]; }
+        while (parent && !task.reportTo) { recipients.add(parent.to); parent = state.tasks[parent.parentId]; }
         recipients.delete(task.to);
         for (const to of recipients) notify(state, run, task.to, to, kind, {
             taskId: task.id, status: task.status, partIds: task.partIds, summary: task.summary ?? task.reason ?? '', ...detail
@@ -353,6 +356,11 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'publish') {
                     requireRun();
+                    // 方量上限：权威闸口，与 tools.useSkill 的生成期校验互补。
+                    const blockLimit = run.spec?.blockLimit;
+                    if (blockLimit && (args.assignment?.blueprint?.blocks?.length ?? 0) > blockLimit) {
+                        throw new Error('蓝图方块数 ' + args.assignment.blueprint.blocks.length + ' 超过上限 ' + blockLimit + '，请缩小设计');
+                    }
                     if (independent) {
                         const task = requireTask();
                         if (run.paused) throw new Error('团队工程已暂停');
@@ -435,6 +443,14 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     // actually intersecting it, so evidence never requires empty parts.
                     partIds = selected.map(part => part.id);
                     const dependsOn = [...new Set(args.dependsOn ?? [])];
+                    const predecessor = run.spec.agents[args.recipient].taskAfter;
+                    if (predecessor) {
+                        const preceding = Object.values(state.tasks).filter(task => task.runId === run.id &&
+                            task.blueprintVersion === run.blueprintVersion && task.to === predecessor && task.from === name &&
+                            task.parentId === parent?.id && !['cancelled', 'superseded'].includes(task.status));
+                        if (preceding.length !== 1) throw new Error('请先为 taskAfter 前序成员 ' + predecessor + ' 登记唯一的本轮任务');
+                        if (!dependsOn.includes(preceding[0].id)) dependsOn.push(preceding[0].id);
+                    }
                     if (dependsOn.some(id => !state.tasks[id] || state.tasks[id].runId !== run.id || state.tasks[id].blueprintVersion !== run.blueprintVersion || ['cancelled', 'superseded'].includes(state.tasks[id].status))) throw new Error('任务依赖无效');
                     const description = text(args.description, '子任务目标'), success = text(args.success, '验收标准');
                     if (parent && dependsOn.some(id => waitsFor(state, id, parent.id))) throw new Error('任务依赖会形成循环等待，不能依赖自己或等待自己的任务');
@@ -455,7 +471,9 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     if (Object.values(state.claims).some(c => (!parent || c.taskId !== parent.id) && c.runId === run.id && overlaps(selected, claimParts(state, c)))) throw new Error('请释放施工范围租约后再委托');
                     const task = { id: randomUUID(), key: idempotencyKey, signature, runId: run.id, blueprintVersion: run.blueprintVersion,
                         ...(parent ? { parentId: parent.id } : {}),
-                        from: name, to: args.recipient, partIds, scope, dependsOn, description, success, status: 'queued', attempt: 0, createdAt: now() };
+                        from: name, to: args.recipient, partIds, scope, dependsOn, description, success,
+                        ...(run.spec.agents[args.recipient].taskReportTo ? { reportTo: run.spec.agents[args.recipient].taskReportTo } : {}),
+                        status: 'queued', attempt: 0, createdAt: now() };
                     if (parent) {
                         for (const [id, claim] of Object.entries(state.claims)) if (claim.taskId === parent.id) delete state.claims[id];
                         parent.workScope = { positions: own.filter(c => !transferred.has(c.pos.join(','))).map(c => c.pos) };

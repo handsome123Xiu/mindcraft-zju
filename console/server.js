@@ -8,6 +8,7 @@ import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createTeamSupervisor } from './team-supervisor.js';
+import { preserveTaskDependencies } from './team-config.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const indexHtml = join(dirname(fileURLToPath(import.meta.url)), 'index.html');
@@ -143,7 +144,7 @@ const server = createServer(async (request, response) => {
     const path = url.pathname;
     try {
         if (request.method === 'GET' && path === '/') {
-            response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             return response.end(await readFile(indexHtml, 'utf8'));
         }
         if (request.method === 'GET' && path === '/styles.css') {
@@ -224,19 +225,21 @@ const server = createServer(async (request, response) => {
             return json(response, 200, { spec, validation: validateTeamSpec(spec) });
         }
         if (request.method === 'POST' && path === '/api/team') {
-            const { validateTeamSpec, TEAM_PRESETS } = await import(moduleUrl('src/building/team-state.js'));
+            const { validateTeamSpec, TEAM_PRESETS, readTeamSpec } = await import(moduleUrl('src/building/team-state.js'));
             const { spec, preset, names, profile } = await readBody(request);
             if (preset && !Object.hasOwn(TEAM_PRESETS, preset)) return json(response, 400, { error: '未知协作范式：' + preset });
             const candidate = preset ? TEAM_PRESETS[preset](names) : spec;
             if (!candidate) throw new Error('缺少 spec 或 preset');
-            const validation = validateTeamSpec(candidate);
+            const reconciled = preset ? { spec: candidate, preserved: [] } :
+                preserveTaskDependencies(candidate, await readTeamSpec(join(root, 'bots')));
+            const validation = validateTeamSpec(reconciled.spec);
             if (!validation.ok) return json(response, 400, { error: validation.errors.join('；'), validation });
-            const savedSpec = await withRouterModels(candidate, profile);
+            const savedSpec = await withRouterModels(reconciled.spec, profile);
             await mkdir(join(root, 'bots'), { recursive: true });
             const pending = join(root, 'bots', 'team.' + randomUUID() + '.tmp');
             await writeFile(pending, JSON.stringify(savedSpec, null, 2) + '\n', 'utf8');
             await rename(pending, join(root, 'bots', 'team.json'));
-            return json(response, 200, { saved: true, validation, spec: savedSpec });
+            return json(response, 200, { saved: true, validation, spec: savedSpec, preservedTaskDependencies: reconciled.preserved });
         }
         if (request.method === 'GET' && path === '/api/team/claims') {
             const { queryClaims } = await import(moduleUrl('src/building/team-state.js'));
