@@ -682,11 +682,25 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 if (method === 'finish_run' || method === 'cancel_run' || method === 'fail_run') {
                     const status = { finish_run: 'completed', cancel_run: 'cancelled', fail_run: 'failed' }[method];
                     if (run?.root === name && run.status === status) return { status }; // lost-response retry
-                    requireRun(); if (run.root !== name) throw new Error('只有协调者可以结束工程');
-                    if (method === 'finish_run' && !capabilities(run.spec, name).finishGate) throw new Error('缺少全局验收权限');
+                    requireRun();
+                    // 全局验收权独立于入口：验收成员持有 finishGate 即可结束工程。
+                    if (method === 'finish_run') {
+                        if (!capabilities(run.spec, name).finishGate) throw new Error('缺少全局验收权限，请由持有 finishGate 的验收成员执行 finish');
+                    } else if (run.root !== name) throw new Error('只有协调者可以取消或失败整个工程');
                     const tasks = Object.values(state.tasks).filter(t => t.runId === run.id);
+                    // 验收者自己的验收任务在 finish 现场核验通过后随 finish_run 一并
+                    // 结算；其余成员的任务必须已经终结。
+                    const finisherTask = method === 'finish_run' ?
+                        Object.values(state.tasks).find(t => t.runId === run.id && t.to === name && t.status === 'running') : null;
                     if (method === 'finish_run' && independent && !run.assignment) throw new Error('所有独立工地均须完工后才能整体验收');
-                    if (method === 'finish_run' && tasks.some(t => !terminal(t))) throw new Error('仍有未完成子任务');
+                    if (method === 'finish_run' && tasks.some(t => t !== finisherTask && !terminal(t))) throw new Error('仍有未完成子任务');
+                    if (finisherTask) {
+                        finisherTask.status = 'completed';
+                        finisherTask.summary = '整体验收通过，工程完成';
+                        finisherTask.finishedToken = finisherTask.token;
+                        releaseTask(state, finisherTask);
+                        report(state, finisherTask, 'task_result');
+                    }
                     return endRun(state, run, status, method === 'fail_run' ? text(args.reason, '失败原因') : '');
                 }
                 throw new Error('未知团队请求：' + method);

@@ -110,8 +110,8 @@ try {
     const modes = ['pipeline', 'centralized', 'router', 'competitive', 'parallel',
         'voting', 'peers', 'handoff', 'blackboard', 'swarm'];
     assert.deepEqual(await evaluate("[...document.querySelectorAll('[data-preset]')].map(button => button.dataset.preset)"), modes);
-    const edgesByMode = { pipeline: 5, centralized: 3, router: 4, competitive: 2, parallel: 3,
-        voting: 7, peers: 3, handoff: 2, blackboard: 3, swarm: 5 };
+    const edgesByMode = { pipeline: 3, centralized: 3, router: 4, competitive: 2, parallel: 3,
+        voting: 7, peers: 3, handoff: 6, blackboard: 3, swarm: 6 };
     for (const mode of [...modes.filter(mode => mode !== 'centralized'), 'centralized']) {
         saved = null;
         await call('Page.navigate', { url });
@@ -150,19 +150,28 @@ try {
         }
         if (mode === 'pipeline') {
             // Simulate an already-open old page dropping newly introduced fields.
+            // Use the 4-member variant so multiple taskAfter nodes are covered.
+            const restored = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
+            assert.equal(Object.keys(restored.agents).length, 3, 'default pipeline is designer/builder/acceptor');
+            // The fixture /api/team only accepts specs; fetch the 4-member preset
+            // spec, save it once (same shape), then simulate an already-open old
+            // page dropping the taskAfter fields and saving again.
             await evaluate(`(async () => {
-                const old = JSON.parse(document.querySelector('#teamEditor').value);
+                const template = await (await fetch('/api/team/presets/pipeline?name=designer&name=builder1&name=builder2&name=acceptor')).json();
+                const first = await fetch('/api/team', {method:'POST', body:JSON.stringify({spec:template.spec})});
+                if (!first.ok) throw new Error('preset save failed');
+                const old = template.spec;
                 for (const node of Object.values(old.agents)) delete node.taskAfter;
                 const response = await fetch('/api/team', {method:'POST', body:JSON.stringify({spec:old})});
                 if (!response.ok) throw new Error('old-page save failed');
             })()`);
             assert.equal(saved.agents.builder2.taskAfter, 'builder1');
-            assert.equal(saved.agents.builder3.taskAfter, 'builder2');
+            assert.equal(saved.agents.acceptor.taskAfter, 'builder2');
             await call('Page.reload');
-            await until(() => evaluate("!!document.querySelector('#teamEditor').value && JSON.parse(document.querySelector('#teamEditor').value).agents.builder3?.taskAfter === 'builder2'"), 'Old-page save erased stage dependencies');
-            await evaluate("(() => { const editor = document.querySelector('#teamEditor'); const spec = JSON.parse(editor.value); spec.agents.builder3.taskAfter = null; editor.value = JSON.stringify(spec); editor.dispatchEvent(new Event('blur')); document.querySelector('#teamEntry').dispatchEvent(new Event('change')); })()");
+            await until(() => evaluate("!!document.querySelector('#teamEditor')?.value && JSON.parse(document.querySelector('#teamEditor').value).agents.acceptor?.taskAfter === 'builder2'"), 'Old-page save erased stage dependencies');
+            await evaluate("(() => { const editor = document.querySelector('#teamEditor'); const spec = JSON.parse(editor.value); spec.agents.acceptor.taskAfter = null; editor.value = JSON.stringify(spec); editor.dispatchEvent(new Event('blur')); document.querySelector('#teamEntry').dispatchEvent(new Event('change')); })()");
             await click('#applyCanvas');
-            await until(() => saved.agents.builder3.taskAfter === null, 'Explicit prerequisite removal must remain possible');
+            await until(() => saved.agents.acceptor.taskAfter === null, 'Explicit prerequisite removal must remain possible');
         }
     }
     assert.equal(await evaluate("document.querySelectorAll('#teamCanvas g').length"), 3);

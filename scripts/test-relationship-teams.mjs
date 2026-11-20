@@ -366,31 +366,41 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     } finally { f.runtime.close(); }
 }
 
-// Pipeline handoff drives the real clients and scoped building tools without entry approval.
+// Pipeline (designer -> builder -> acceptor, no lead) drives the real clients and
+// scoped building tools without entry approval; the acceptor finishes the run itself.
 {
-    const template = TEAM_PRESETS.pipeline();
+    const template = TEAM_PRESETS.pipeline(['designer', 'builder1', 'builder2', 'acceptor']);
     const stale = structuredClone(template);
     for (const node of Object.values(stale.agents)) delete node.taskAfter;
     const { spec: pipeline, preserved } = preserveTaskDependencies(stale, template);
-    assert.deepEqual(preserved, ['builder2', 'builder3']);
+    assert.deepEqual(preserved, ['builder2', 'acceptor']);
     assert.equal(stale.agents.builder2.taskAfter, undefined, 'save reconciliation must not mutate the request');
     const cleared = structuredClone(template);
-    cleared.agents.builder3.taskAfter = null;
-    assert.equal(preserveTaskDependencies(cleared, template).spec.agents.builder3.taskAfter, null);
+    cleared.agents.acceptor.taskAfter = null;
+    assert.equal(preserveTaskDependencies(cleared, template).spec.agents.acceptor.taskAfter, null);
     const centralized = TEAM_PRESETS.centralized();
     assert.deepEqual(preserveTaskDependencies(centralized, template).spec, centralized, 'changing paradigms must not inherit pipeline dependencies');
     const changedRoute = structuredClone(stale);
-    changedRoute.agents.builder2.taskReportTo = 'lead';
-    assert.equal(preserveTaskDependencies(changedRoute, template).spec.agents.builder2.taskAfter, undefined);
+    changedRoute.agents.builder1.taskReportTo = 'acceptor';
+    assert.equal(preserveTaskDependencies(changedRoute, template).spec.agents.builder1.taskAfter, undefined);
+    assert.equal(pipeline.entryAgent, 'designer');
+    assert.equal(capabilities(pipeline, 'designer').finishGate, false, 'the entry no longer needs the acceptance gate');
+    assert.equal(capabilities(pipeline, 'acceptor').finishGate, true, 'the acceptance gate moved to the acceptor');
+    assert(!actionAllowed(pipeline, 'acceptor', 'place_block').allowed, 'the acceptor never builds');
+    assert(!actionAllowed(pipeline, 'designer', 'inspect_build').allowed, 'the designer neither builds nor accepts');
     assert.equal(pipeline.agents.builder1.taskReportTo, 'builder2');
-    assert.equal(pipeline.agents.builder2.taskReportTo, 'builder3');
-    assert.equal(pipeline.agents.builder3.taskReportTo, 'lead');
+    assert.equal(pipeline.agents.builder2.taskReportTo, 'acceptor');
+    assert.equal(pipeline.agents.acceptor.taskAfter, 'builder2');
+    assert.equal(pipeline.edges.length, 5);
     const cyclic = structuredClone(pipeline);
     cyclic.agents.builder1.taskAfter = 'builder2';
     assert(!validateTeamSpec(cyclic).ok, 'workflow prerequisites cannot contain a cycle');
     const invalid = structuredClone(pipeline);
-    invalid.agents.builder1.taskReportTo = 'builder3';
+    invalid.agents.builder1.taskReportTo = 'acceptor';
     assert(!validateTeamSpec(invalid).ok, 'handoffs require an actual relationship');
+    const gateless = structuredClone(pipeline);
+    gateless.agents.acceptor.permissions.finishGate = false;
+    assert(!validateTeamSpec(gateless).ok, 'some member must still hold the acceptance gate');
     const f = fixture(pipeline);
     const chat = [], events = [], requests = [], started = [], clients = [], errors = [];
     const cells = new Map();
@@ -423,15 +433,16 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     let releaseFirst;
     const firstGate = new Promise(resolve => { releaseFirst = resolve; });
     try {
-        assert.throws(() => call('lead', 'delegate', delegate('out-of-order', 'builder3', [[4,0,0]])), /taskAfter/);
-        const floor = call('lead', 'delegate', delegate('floor', 'builder1', [[0,0,0], [1,0,0]]));
-        const wall = call('lead', 'delegate', delegate('wall', 'builder2', [[2,0,0], [3,0,0]]));
-        call('lead', 'delegate', delegate('roof', 'builder3', [[4,0,0], [5,0,0], [6,0,0], [7,0,0]]));
+        assert.throws(() => call('designer', 'finish_run', { runId: 'run' }), /缺少全局验收权限/, 'the designer cannot finish the run');
+        const stage1 = call('designer', 'delegate', delegate('stage-1', 'builder1', [[0,0,0], [1,0,0]]));
+        assert.throws(() => call('designer', 'delegate', delegate('acceptance-too-early', 'acceptor', [[4,0,0]])), /taskAfter/, 'the acceptance task must wait for the last stage');
+        const stage2 = call('designer', 'delegate', delegate('stage-2', 'builder2', [[2,0,0], [3,0,0]]));
+        const acceptance = call('designer', 'delegate', delegate('acceptance', 'acceptor', [[4,0,0], [5,0,0], [6,0,0], [7,0,0]]));
         const queued = f.runtime.snapshot().tasks;
-        assert.deepEqual(queued.find(task => task.to === 'builder2').dependsOn, [floor.taskId]);
-        assert.deepEqual(queued.find(task => task.to === 'builder3').dependsOn, [wall.taskId]);
+        assert.deepEqual(queued.find(task => task.to === 'builder2').dependsOn, [stage1.taskId]);
+        assert.deepEqual(queued.find(task => task.to === 'acceptor').dependsOn, [stage2.taskId]);
         requests.length = 0;
-        for (const name of ['builder1', 'builder2', 'builder3']) {
+        for (const name of ['builder1', 'builder2', 'acceptor']) {
             const channel = new EventEmitter();
             channel.connected = true;
             channel.send = (message, callback) => {
@@ -458,13 +469,20 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
                     const job = { teamRunId: run.id, teamTask: task, request: task.description, origin: run.origin,
                         assignment: run.assignment, assignmentVersion: run.blueprintVersion, design: run.design,
                         dimension: run.dimension, placed: {}, removed: {}, events: [],
-                        plan: { requirements: [], steps: [] } };
+                        plan: { requirements: [{ id: 'goal', description: run.request }], steps: [] } };
                     const tools = createBuildingTools({ team, job, world, checkpoint: async () => {} });
-                    for (const position of task.scope.positions) {
-                        await tools.call('place_block', { position, block: 'stone', partId: 'part-1', assignmentVersion: 1 });
+                    if (name === 'acceptor') {
+                        // The acceptance stage inspects the whole site and then
+                        // finishes the run itself, settling its own running task.
+                        await tools.call('inspect_build', {});
+                        await team.finish(job);
+                    } else {
+                        for (const position of task.scope.positions) {
+                            await tools.call('place_block', { position, block: 'stone', partId: 'part-1', assignmentVersion: 1 });
+                        }
+                        await team.settle(job, { status: 'completed', summary: name + ' 现场 remaining=0',
+                            teamEvidence: tools.inspectTask() });
                     }
-                    await team.settle(job, { status: 'completed', summary: name + ' 现场 remaining=0',
-                        teamEvidence: tools.inspectTask() });
                     status = 'completed';
                 },
                 async stop() {}
@@ -473,23 +491,30 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
         await until(() => started.length === 1);
         assert.deepEqual(started, ['builder1']);
         assert.equal(f.runtime.snapshot().tasks.find(task => task.to === 'builder2').status, 'queued');
-        assert.equal(call('lead', 'inbox').length, 0, 'entry stays asleep while stages run');
+        assert.equal(call('designer', 'inbox').length, 0, 'the designer stays asleep while stages run');
         requests.length = 0;
         releaseFirst();
         await until(() => f.runtime.snapshot().tasks.every(task => task.status === 'completed'));
-        await until(() => events.some(event => event.recipient === 'builder3' && event.kind === 'task_result'));
-        assert.deepEqual(started, ['builder1', 'builder2', 'builder3']);
-        assert(!requests.some(request => request.name === 'lead'), 'all stages advance without another entry request');
+        await until(() => events.some(event => event.recipient === 'builder2' && event.kind === 'task_result'));
+        assert.deepEqual(started, ['builder1', 'builder2', 'acceptor']);
+        assert(f.runtime.snapshot().runs[0] === undefined || f.runtime.snapshot().runs.every(run => run.status === 'completed'), 'the acceptor finished the whole run');
+        assert(!requests.some(request => request.name === 'designer'), 'all stages advance without another entry request');
+        assert(requests.some(request => request.name === 'acceptor' && request.method === 'finish_run'), 'the acceptor executed finish_run itself');
         assert(!requests.some(request => request.method === 'message'), 'completion itself delivers the handoff');
         assert(events.some(event => event.recipient === 'builder2' && event.from === 'builder1' && event.payload.status === 'completed'));
-        assert(events.some(event => event.recipient === 'builder3' && event.from === 'builder2' && event.payload.status === 'completed'));
-        assert.deepEqual(call('lead', 'inbox').map(event => [event.from, event.kind]), [['builder3', 'task_result']]);
-        assert.equal(cells.size, 8);
-        for (const [speaker, recipient] of [['builder1', 'builder2'], ['builder2', 'builder3'], ['builder3', 'lead']]) {
-            assert(chat.some(item => item.speaker === speaker && item.text.includes('[-> ' + recipient + ']') && item.text.includes('阶段交付')));
+        assert(events.some(event => event.recipient === 'acceptor' && event.from === 'builder2' && event.payload.status === 'completed'));
+        // finish_run 由验收者自己执行：工程结束后消息队列被清空，designer 的
+        // inbox 不再持有验收结果（旧流水线里这是 lead 的必收事件）。
+        assert.deepEqual(call('designer', 'inbox'), []);
+        assert.equal(cells.size, 4);
+        for (const [speaker, recipient] of [['builder1', 'builder2'], ['builder2', 'acceptor']]) {
+            assert(chat.some(item => item.speaker === speaker && item.text.includes('[-> ' + recipient + ']') && item.text.includes('阶段交付')),
+                speaker + ' hands over to ' + recipient);
         }
-        assert(!chat.some(item => ['builder1', 'builder2'].includes(item.speaker) && item.text.includes('[-> lead]')));
-        assert.equal(call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
+        // acceptor 的验收任务没有 taskReportTo：聊天里不会出现它向 designer 的
+        // "阶段交付"（工程由它直接结束），只有领工播报和 [整体验收通过] 广播。
+        assert(!chat.some(item => item.speaker === 'acceptor' && item.text.includes('[-> designer]') && item.text.includes('阶段交付')));
+        assert(chat.some(item => item.text.includes('整体验收通过')), 'finish_run is announced on the game chat');
         assert.deepEqual(errors, []);
     } finally {
         releaseFirst();
@@ -615,6 +640,8 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     }
 }
 {
+    // Relay handoff: autonomous next-leg selection via recursive delegation; the
+    // last leg finishes the run itself (finishGate on every relay member).
     const f = fixture(TEAM_PRESETS.handoff());
     const chat = [];
     const transcript = createTeamTranscript({ snapshot: () => f.runtime.snapshot(), log: () => {},
@@ -625,34 +652,35 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
         return result;
     }
     try {
-        f.call('lead', 'delegate', delegate('wall', 'builder_a'));
-        const first = f.call('builder_a', 'take_task').task;
-        const remaining = [[4,0,0], [5,0,0], [6,0,0], [7,0,0]];
-        const offer = call('builder_a', 'propose_share', delegate('baton', 'builder_b', remaining,
-            { ...scopeOf(first), description: '续建后半段，前四格已验收' })).proposal;
-        call('builder_b', 'respond_share', { runId: 'run', proposalId: offer.id, accept: true });
-        assert.equal(f.call('builder_b', 'take_task'), null, 'acceptance does not grant write scope');
-        const child = call('builder_a', 'commit_share', { ...scopeOf(first), proposalId: offer.id });
-        const second = f.call('builder_b', 'take_task').task;
-        assert.equal(second.id, child.taskId);
-        assert.throws(() => f.call('builder_a', 'assert_write', { ...scopeOf(first), partId: 'part-1', positions: [[4,0,0]] }), /超出/);
-        assert.throws(() => f.finish('builder_a', first, 8), /子任务尚未完成/);
-        call('builder_b', 'task_result', { ...scopeOf(second), status: 'blocked', summary: '接棒位置前有障碍' });
-        const resume = { runId: 'run', taskId: second.id, recipient: 'builder_b' };
-        assert.throws(() => f.call('lead', 'reassign', resume), /连线/);
-        call('builder_a', 'reassign', resume);
-        const resumed = f.call('builder_b', 'take_task').task;
-        assert.equal(resumed.id, second.id);
-        assert.equal(resumed.parentId, first.id);
-        f.finish('builder_b', resumed, 4);
-        f.finish('builder_a', first, 8);
-        assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
-        assert.deepEqual(chat.map(({ speaker }) => speaker), ['builder_a', 'builder_b', 'builder_a', 'builder_b', 'builder_a']);
-        assert(chat[3].text.startsWith('[-> builder_a] [阻塞'));
-        assert(chat[4].text.startsWith('[-> builder_b] [重派'));
-        assert(chat[0].text.startsWith('[-> builder_b] [提议协作]'));
-        assert(chat[1].text.startsWith('[-> builder_a] [接受协作]'));
-        assert(chat[2].text.startsWith('[-> builder_b] [交接'));
+        // The entry hands the whole task to a freely chosen first leg.
+        f.call('entry', 'delegate', delegate('wall', 'relay_1'));
+        const first = f.call('relay_1', 'take_task').task;
+        // Relay members never delegate back to the entry (it stays free for final acceptance).
+        assert.throws(() => call('relay_1', 'delegate', delegate('back', 'entry', [[4,0,0]], scopeOf(first))), /入口/);
+        // relay_1 keeps the front four cells and hands the rest to a self-chosen next leg.
+        const rest = [[4,0,0], [5,0,0], [6,0,0], [7,0,0]];
+        const child = call('relay_1', 'delegate', delegate('baton', 'relay_2', rest, scopeOf(first))).taskId;
+        const second = f.call('relay_2', 'take_task').task;
+        assert.equal(second.id, child);
+        assert.equal(second.parentId, first.id);
+        // Re-read the parent after delegation: its live workScope shrank to the kept cells.
+        const shrunk = f.runtime.snapshot().tasks.find(task => task.id === first.id);
+        assert.equal(shrunk.workScope.count, 4, 'the delegator keeps the untransferred scope');
+        assert.throws(() => f.call('relay_1', 'assert_write', { ...scopeOf(first), partId: 'part-1', positions: [[4,0,0]] }), /超出/);
+        assert.throws(() => f.finish('relay_1', first, 8), /子任务尚未完成/);
+        // The next leg itself relays the tail to a third member (recursive selection).
+        const tail = [[6,0,0], [7,0,0]];
+        const grandchild = call('relay_2', 'delegate', delegate('tail', 'relay_3', tail, scopeOf(second))).taskId;
+        const third = f.call('relay_3', 'take_task').task;
+        assert.equal(third.parentId, second.id);
+        f.finish('relay_3', third, 2);
+        f.finish('relay_2', second, 4);
+        f.finish('relay_1', first, 8);
+        // Every relay member holds finishGate: once all tasks are terminal any of
+        // them can finish the run directly — no return to the entry required.
+        assert.equal(call('relay_3', 'finish_run', { runId: 'run' }).status, 'completed');
+        assert(chat.some(item => item.text.includes('整体验收通过')), 'the relay member announced the final acceptance');
+        assert(!chat.some(item => item.speaker === 'entry'), 'the entry never had to act after dispatch');
     } finally { f.runtime.close(); }
 }
 {
@@ -688,32 +716,50 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     } finally { f.runtime.close(); }
 }
 {
-    const f = fixture(TEAM_PRESETS.swarm());
+    // Swarm: independent blueprints. The entry only assigns sites; every member
+    // decides its own design and location inside its site and stops on its own.
+    const f = fixture(TEAM_PRESETS.swarm(), ':memory:', false);
     try {
-        f.call('lead', 'delegate', delegate('area-a', 'builder_a', [[0,0,0], [1,0,0]]));
-        f.call('lead', 'delegate', delegate('area-b', 'builder_b', [[2,0,0], [3,0,0], [4,0,0]]));
-        f.call('lead', 'delegate', delegate('area-c', 'builder_c', [[5,0,0], [6,0,0], [7,0,0]]));
-        const a = f.call('builder_a', 'take_task').task;
-        const b = f.call('builder_b', 'take_task').task;
-        const c = f.call('builder_c', 'take_task').task;
-        const broadcast = { runId: 'run', text: 'A 区已经验收，邻区有需要可找我。' };
-        const chat = [];
-        const transcript = createTeamTranscript({ snapshot: () => f.runtime.snapshot(), log: () => {},
-            notify: (speaker, text) => chat.push([speaker, text]) });
-        transcript('builder_a', 'message', broadcast, f.call('builder_a', 'message', broadcast));
-        assert.deepEqual(chat, [['builder_a', '[-> lead、builder_b] ' + broadcast.text]]);
-        assert.throws(() => f.call('builder_a', 'message', { ...broadcast, recipient: 'builder_c' }), /连线/);
-        f.finish('builder_a', a, 2);
-        const offer = f.call('builder_b', 'propose_share', delegate('assist-neighbor', 'builder_a', [[2,0,0]], scopeOf(b))).proposal;
-        f.call('builder_a', 'respond_share', { runId: 'run', proposalId: offer.id, accept: true });
-        f.call('builder_b', 'commit_share', { ...scopeOf(b), proposalId: offer.id });
-        const assistance = f.call('builder_a', 'take_task').task;
-        assert.equal(assistance.parentId, b.id);
-        assert.equal(f.runtime.snapshot().tasks.find(task => task.id === c.id).status, 'running');
-        f.finish('builder_a', assistance, 1);
-        f.finish('builder_b', b, 3);
-        f.finish('builder_c', c, 3);
-        assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
+        f.call('entry', 'delegate_site', { runId: 'run', recipient: 'builder_1',
+            origin: [0,0,0], region: { min: [-3,0,-3], max: [10,14,10] } });
+        f.call('entry', 'delegate_site', { runId: 'run', recipient: 'builder_2',
+            origin: [20,0,0], region: { min: [17,0,-3], max: [30,14,10] } });
+        f.call('entry', 'delegate_site', { runId: 'run', recipient: 'builder_3',
+            origin: [40,0,0], region: { min: [37,0,-3], max: [50,14,10] } });
+        const s1 = f.call('builder_1', 'take_task');
+        const s2 = f.call('builder_2', 'take_task');
+        const s3 = f.call('builder_3', 'take_task');
+        assert.deepEqual(f.runtime.snapshot().tasks.map(task => [task.to, task.status]),
+            [['builder_1', 'running'], ['builder_2', 'running'], ['builder_3', 'running']],
+            'all members build in parallel with no dependencies');
+        // Each member publishes its OWN blueprint (shapes are relative to the site origin).
+        const own = (o, block) => compileBlueprint({ shapes: [
+            { kind: 'box', part: 'house', min: [0,0,0], max: [3,2,3], block } ] }, o);
+        f.call('builder_1', 'publish', { runId: 'run', taskId: s1.task.id, token: s1.task.token, previousVersion: 0,
+            assignment: { version: 1, dimension: 'overworld', blueprint: own([0,0,0], 'oak_planks') },
+            design: { origin: [0,0,0], summary: 'builder_1 的木屋' } });
+        f.call('builder_2', 'publish', { runId: 'run', taskId: s2.task.id, token: s2.task.token, previousVersion: 0,
+            assignment: { version: 1, dimension: 'overworld', blueprint: own([20,0,0], 'sandstone') },
+            design: { origin: [20,0,0], summary: 'builder_2 的砂岩塔' } });
+        f.call('builder_3', 'publish', { runId: 'run', taskId: s3.task.id, token: s3.task.token, previousVersion: 0,
+            assignment: { version: 1, dimension: 'overworld', blueprint: own([40,0,0], 'stone') },
+            design: { origin: [40,0,0], summary: 'builder_3 的石台' } });
+        // A blueprint straying outside its own site is rejected — placement is free
+        // but bounded by the site.
+        assert.throws(() => f.call('entry', 'finish_run', { runId: 'run' }), /完工/, 'no site finished yet');
+        // Members stop independently; the runtime combines blueprints once all sites complete.
+        const settle = (member, taken, part) => f.call(member, 'task_result', { runId: 'run',
+            taskId: taken.task.id, token: taken.task.token, blueprintVersion: 1,
+            status: 'completed', summary: member + ' remaining=0',
+            evidence: [{ partId: part, total: 48, remaining: 0 }] });
+        settle('builder_1', s1, 'part-1');
+        settle('builder_2', s2, 'part-1');
+        // Combined blueprint waits for every site; the dispatcher can read it via context.
+        assert(!f.call('entry', 'context', { runId: 'run' }).sharedAssignment, 'combined blueprint waits for every site');
+        settle('builder_3', s3, 'part-1');
+        assert(f.call('entry', 'context', { runId: 'run' }).sharedAssignment, 'runtime combines all independent blueprints');
+        // The dispatcher does the final acceptance over the combined result.
+        assert.equal(f.call('entry', 'finish_run', { runId: 'run' }).status, 'completed');
     } finally { f.runtime.close(); }
 }
 

@@ -374,7 +374,8 @@ const ROLE_PALETTE = ['#8c70a5', '#488f83', '#a87b32', '#bb785a', '#698844', '#4
 const ROLE_LABELS = {
   lead: '工程入口', builder: '施工成员', inspector: '检查员', router: '路由员',
   candidate: '候选者', voter: '投票者', stage_builder: '阶段施工', module_builder: '独立施工',
-  starter: '首棒', receiver: '接棒', preparer: '基础准备', finisher: '后续施工', neighbor: '邻域施工'
+  designer: '蓝图设计', acceptor: '验收成员', relay: '接力成员', swarm: '群体并行',
+  preparer: '基础准备', finisher: '后续施工'
 };
 const roleColor = role => role === 'lead' ? '#397a91' : role === 'inspector' ? '#688f42' : role === 'builder' ? '#8f7458'
   : ROLE_PALETTE[[...role].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % ROLE_PALETTE.length];
@@ -819,16 +820,16 @@ $('#toggleJson').onclick = () => {
   block.style.display = block.style.display === 'none' ? 'block' : 'none';
 };
 const PRESET_POSITIONS = {
-  pipeline: [[0.5, 0.18], [0.16, 0.72], [0.5, 0.72], [0.84, 0.72]],
+  pipeline: [[0.5, 0.2], [0.5, 0.56], [0.5, 0.84]],
   centralized: [[0.5, 0.23], [0.26, 0.72], [0.74, 0.72]],
   router: [[0.5, 0.18], [0.14, 0.72], [0.38, 0.78], [0.62, 0.78], [0.86, 0.72]],
   competitive: [[0.5, 0.24], [0.24, 0.72], [0.76, 0.72]],
   parallel: [[0.5, 0.23], [0.18, 0.72], [0.5, 0.72], [0.82, 0.72]],
   voting: [[0.5, 0.16], [0.12, 0.50], [0.37, 0.50], [0.63, 0.50], [0.88, 0.50], [0.25, 0.76], [0.50, 0.76], [0.75, 0.76]],
   peers: [[0.5, 0.23], [0.24, 0.73], [0.76, 0.73]],
-  handoff: [[0.25, 0.23], [0.25, 0.60], [0.76, 0.74]],
+  handoff: [[0.5, 0.2], [0.16, 0.72], [0.5, 0.72], [0.84, 0.72]],
   blackboard: [[0.5, 0.22], [0.18, 0.55], [0.82, 0.55], [0.5, 0.81]],
-  swarm: [[0.5, 0.23], [0.16, 0.71], [0.5, 0.71], [0.84, 0.71]]
+  swarm: [[0.5, 0.2], [0.16, 0.72], [0.5, 0.72], [0.84, 0.72]]
 };
 let presetRequest = 0;
 async function applyTeamPreset(button, reset = false) {

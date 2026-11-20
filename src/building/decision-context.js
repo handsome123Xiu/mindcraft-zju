@@ -40,12 +40,13 @@ export function decisionInstructions(job, team, agentName) {
         if ((name.startsWith('place_') || ['inspect_part', 'inspect_blueprint', 'claim_part'].includes(name)) && !job.assignment) return false;
         return true;
     });
+    const canFinish = team?.spec() && roleOf(spec, team.self).finishGate;
     const actionNames = job.teamCoordination ? ['tool', 'batch', 'end_turn', 'blocked'] :
         ['tool', 'batch', 'update_plan', 'blocked', 'wait_for_user',
             ...(!job.assignment && !job.demolition && !job.plan.steps.length ? ['end_turn'] : []),
             ...(canDesign ? ['skill'] : []),
             ...(team?.runtime ? ['wait_for_team'] : []),
-            ...(!independent || job.assignment ? [job.teamTask ? 'complete_task' : 'finish'] : [])];
+            ...(!independent || job.assignment ? [job.teamTask && !canFinish ? 'complete_task' : 'finish'] : [])];
     // Common tools are ready immediately. Less frequent tools are discovered
     // through get_tool_help; the next context exposes their schema. Permissions
     // are still checked by the executor, including immediately before writes.

@@ -433,13 +433,11 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                         output = result;
                     }
                     if (action.action === 'finish') {
-                        if (job.teamTask) throw new Error('请用 complete_task 完成自己的委托部件');
-                        if (team?.spec()) {
-                            const role = roleOf(team.spec(), team.self);
-                            if (!role.finishGate) {
-                                throw new Error('缺少全局验收权限，请向团队入口汇报完成情况');
-                            }
-                        }
+                        // 团队验收成员持有全局验收权：其验收任务在 finish 现场核验
+                        // 通过后由运行时随 finish_run 一并结算，无需先 complete_task。
+                        const gate = team?.spec() ? roleOf(team.spec(), team.self).finishGate : false;
+                        if (job.teamTask && !gate) throw new Error('请用 complete_task 完成自己的委托部件');
+                        if (!gate) throw new Error('缺少全局验收权限，请向团队入口汇报完成情况');
                         const inspection = tools.inspect();
                         if (inspection.differences.length) throw Object.assign(
                             new Error('现场验收尚未通过：' + JSON.stringify(compactResult(inspection))),
