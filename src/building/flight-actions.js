@@ -55,20 +55,20 @@ export function createFlightActions(bot, { vector, tickMs = 50, timeoutMs = 3000
     }
 
     function route(start, end) {
-        if (clearSegment(start, end)) return [end];
+        if (clearSegment(start, end)) return { points: [end], phasing: false };
         for (const rise of [2, 4, 8, 12]) {
             const y = Math.max(start[1], end[1]) + rise;
             const up = [start[0], y, start[2]];
             const across = [end[0], y, end[2]];
             if (clearSegment(start, up) && clearSegment(up, across) && clearSegment(across, end)) {
-                return [up, across, end];
+                return { points: [up, across, end], phasing: false };
             }
         }
         const detour = planFlightDetour(start, end, { ...routeOptions, canOccupy, clearSegment });
-        if (detour) return detour;
+        if (detour) return { points: detour, phasing: false };
         // Wall-phasing fallback: a direct line through loaded blocks. The server
         // may still correct the bot; landing checks remain fully strict.
-        if (passThroughWalls) return [end];
+        if (passThroughWalls) return { points: [end], phasing: true };
         return null;
     }
 
@@ -112,9 +112,10 @@ export function createFlightActions(bot, { vector, tickMs = 50, timeoutMs = 3000
         }
         corrected = false;
         active = true;
+        let reached = false;
         const started = Date.now();
         try {
-            for (const waypoint of path) {
+            for (const waypoint of path.points) {
                 while (distance(body(), waypoint) > 0.001) {
                     signal?.throwIfAborted();
                     if (corrected || !flying || bot.game.gameMode !== 'creative' || Date.now() - started >= timeoutMs) {
@@ -124,7 +125,7 @@ export function createFlightActions(bot, { vector, tickMs = 50, timeoutMs = 3000
                     const current = body();
                     const scale = Math.min(1, 0.25 / distance(current, waypoint));
                     const next = current.map((n, i) => n + (waypoint[i] - n) * scale);
-                    if (!passThroughWalls && !clearSegment(current, next)) { failure = 'route_changed'; return false; }
+                    if (!path.phasing && !clearSegment(current, next)) { failure = 'route_changed'; return false; }
                     bot.entity.velocity.set(0, 0, 0);
                     bot.entity.onGround = false;
                     bot.entity.position.set(...next);
@@ -134,11 +135,17 @@ export function createFlightActions(bot, { vector, tickMs = 50, timeoutMs = 3000
             // Give the normal position sender and server corrections time to run.
             await wait(tickMs * 2, signal);
             signal?.throwIfAborted();
-            return !corrected && flying && bot.game.gameMode === 'creative' &&
+            reached = !corrected && flying && bot.game.gameMode === 'creative' &&
                 canOccupy(body()) && distance(body(), target) < 0.35;
+            if (!reached) failure ??= corrected ? 'server_correction' : 'flight_unconfirmed';
+            return reached;
         } finally {
             active = false;
             halt();
+            // A server-rejected flight must not strand later actions in hover
+            // mode (which bypasses ground pathfinding). Explicit cancellation
+            // still holds position instead of making a paused bot fall.
+            if (!reached && !signal?.aborted) reset();
         }
     }
 

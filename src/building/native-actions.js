@@ -1,6 +1,10 @@
 import { ACTION_SCHEMAS, TOOL_SCHEMAS, parseAction, protocolError, validateSchema } from './action-protocol.js';
 
 const descriptions = {
+    read_blackboard:'Read shared project facts and draft geometry. Inspect once, then draft/review or wait according to your profile; repeated reads of an unchanged revision add no information. draftId with offset/limit pages shapes; prefix pages review entries.',
+    write_blackboard:'Write shared design facts or your review. key/content are required. expectedRevision is the current version of this ENTRY (0 creates), not global revision. This edits shared data, not world blocks; no delegated construction task is required.',
+    wait_for_blackboard:'Call alone after read/contribution; wait for a newer shared-board revision without model polling.',
+    blueprint_blackboard:'Designers may directly call operation=draft (no draft yet) or revise(baseDraftId,brief), without a construction task or plan. These operations only create shared draft data. Only publish(draftId) and request_revision(brief) are entry-only. publish uses that exact reviewed draft. request_revision preserves built cells and pauses writes until new publication. Follow profile review policy; this tool does not count approvals. Call alone.',
     observe_environment: 'Observe an explicit world-coordinate region chosen from the task footprint, height and current facts. region.min/max are required; no default scan. Expand or page when needed; unloaded/omitted cells are not air.',
     update_plan: 'Create/replace the complete step list with patch=false. patch=true updates existing IDs (title/success merge from the stored step) and appends submitted new IDs in order. New steps need id,title,success. Omit immutable requirements on progress updates.',
     design_blueprint: 'Design or revise after planning. Origin is the first buildable cell above the existing ground; a new floor starts at relative y=0 or above. Do not ask for geometry below origin. Reuse relevant observations. Publication checks the live site.',
@@ -10,7 +14,8 @@ const descriptions = {
     wait_for_team: 'Suspend requests until a team event. Call by itself, after dispatch results are known.',
     complete_task: 'Verify and complete your assigned task. All plan steps and helper tasks must be done. Call by itself.',
     finish: 'Verify the whole project and all requirements. Call by itself after all work and plan steps are done.',
-    send_message: 'Send text to the user by default, or to an explicitly named permitted teammate.'
+    end_turn: 'End this coordination turn. Call ALONE in a NEW response after any message result. With no new contribution, call alone immediately; acknowledgements do not require a reply.',
+    send_message: 'Send text to the user by default, or to an explicitly named permitted teammate. Send only new facts/questions/proposals, not acknowledgements of acknowledgements. Read the result BEFORE calling end_turn or any wait in a separate response; never combine them.'
 };
 
 // The API sees individual flat functions, not a function containing a second

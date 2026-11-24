@@ -7,10 +7,12 @@ export function preserveTaskDependencies(candidate, previous) {
     if (spec?.entryAgent !== previous?.entryAgent) return { spec, preserved };
     for (const [name, node] of Object.entries(spec?.agents ?? {})) {
         const before = previous?.agents?.[name];
-        if (!node || !before?.taskAfter || Object.hasOwn(node, 'taskAfter') ||
-            node.role !== before.role || node.taskReportTo !== before.taskReportTo) continue;
-        node.taskAfter = before.taskAfter;
-        preserved.push(name);
+        if (!node || !before || node.role !== before.role || node.taskReportTo !== before.taskReportTo) continue;
+        for (const field of ['taskAfter', 'taskAcceptanceTo']) {
+            if (!before[field] || Object.hasOwn(node, field)) continue;
+            node[field] = before[field];
+            if (!preserved.includes(name)) preserved.push(name);
+        }
     }
     return { spec, preserved };
 }

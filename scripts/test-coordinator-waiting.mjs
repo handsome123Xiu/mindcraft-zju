@@ -8,8 +8,8 @@ import { TEAM_PRESETS } from '../src/building/team-state.js';
 
 // Production loop/client/runtime; no model API or Minecraft. Reproduce a leader
 // polling while two workers still have useful, independently writable work.
-for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event-race', 'manual-pause', 'blocked-dependency', 'paused-recipient', 'unclaimed']) {
-    const spec = TEAM_PRESETS.centralized(['lead', 'a', 'b']);
+for (const preset of ['centralized','peers']) for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event-race', 'manual-pause', 'blocked-dependency', 'blocked-peer-running', 'recover-blocked', 'paused-recipient', 'unclaimed']) {
+    const spec = TEAM_PRESETS[preset](['lead', 'a', 'b']);
     let clock = Date.now();
     const runtime = createTeamRuntime({ spec, now: () => clock, leaseMs: 60000, taskClaimTimeoutMs: 1000 });
     const sessions = Object.fromEntries(Object.keys(spec.agents).map(name => [name, runtime.connect(name)]));
@@ -32,7 +32,11 @@ for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event
     const queued = ['queued', 'paused-recipient', 'unclaimed'].includes(mode);
     const taken = queued ? [] : [call('a', 'take_task'), call('b', 'take_task')].filter(Boolean);
     const scope = task => ({ runId: 'wait-run', taskId: task.id, token: task.token, blueprintVersion: 1 });
-    if (mode === 'blocked-dependency') call('a', 'task_result', { ...scope(taken[0].task), status: 'blocked', summary: 'support unavailable' });
+    if (['blocked-dependency','blocked-peer-running','recover-blocked'].includes(mode)) {
+        call('a', 'task_result', { ...scope(taken[0].task), status: 'blocked', summary: 'support unavailable' });
+        call('a','heartbeat',{status:'blocked',canAcceptTask:true});
+        if(mode==='recover-blocked')taken.shift();
+    }
     const channel = new EventEmitter(); channel.connected = true;
     const errors = [];
     channel.send = (message, callback) => {
@@ -62,7 +66,8 @@ for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event
         for (const event of events) eventPromises.push(controller.receiveTeamEvent(event));
     };
     controller = createBuildingLoop({ team: client, agentName: 'lead',
-        maxModelRequests: mode === 'request-budget' ? 2 : 30,
+        // Closing now explicitly exercises inspect -> plan evidence -> finish.
+        maxModelRequests: mode === 'request-budget' ? 3 : 30,
         timeLimitMs: mode === 'time-budget' ? 80 : 5000,
         world: { snapshot: () => ({ dimension: 'overworld', position: [0,0,4], gameMode: 'creative' }),
             read: pos => blocks.get(pos.join()) ?? (pos[1] < 0 ? 'stone' : 'air') },
@@ -78,6 +83,18 @@ for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event
                 await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
             }
             const context = JSON.parse(turns[0].content);
+            if(mode==='recover-blocked') {
+                const task=context.team.recoveryTasks?.[0];
+                if(task){
+                    assert(context.nextStep.includes(task.id),'blocked recovery takes priority over a running peer');
+                    if(requests===1)return JSON.stringify({action:'wait_for_team',reason:'another peer is running'});
+                    assert(context.recentEvents.some(e=>e.output?.status==='recovery_required'),'waiting did not hide the blocker');
+                    return JSON.stringify({action:'tool',name:'reassign_task',args:{taskId:task.id,recipient:'a'}});
+                }
+                if(context.team.tasks.some(t=>t.to==='a'&&t.status==='queued')){
+                    taken.push(call('a','take_task'));finishWorkers();deliverEvents();
+                }
+            }
             if (alerted && context.team.tasks.some(task => task.claimStalled)) {
                 assert(context.team.feed.some(item => item.text.includes('task_unclaimed')), 'lifecycle notice arrives via team.feed');
                 // A new decision is made with an actionable task ID. Reassign
@@ -90,7 +107,12 @@ for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event
                 if (item) { taken.push(item); finishWorkers(); taken.length = 0; deliverEvents(); }
             }
             if (context.team.tasks.every(task => task.status === 'completed')) {
-                if (context.plan.steps.some(step => step.status !== 'done')) return JSON.stringify({ action: 'update_plan', ...plan(true) });
+                if(!context.lastInspection || context.lastInspection.assignmentVersion!==context.blueprint.version){
+                    assert(context.nextStep.includes('inspect_build once'),'completed workers lead to a fresh whole-project inspection');
+                    return JSON.stringify({action:'tool',name:'inspect_build',args:{}});
+                }
+                if (context.plan.steps.some(step => step.status !== 'done')) {assert(context.nextStep.includes('Next use update_plan'));return JSON.stringify({ action: 'update_plan', ...plan(true) });}
+                assert(context.nextStep.includes('next action is finish'),'completed central entry must submit finish, not poll again');
                 return JSON.stringify({ action: 'finish', summary: 'cakes verified', requirementReview: [{ requirementId: 'goal', satisfied: true, evidence: 'both cells observed' }] });
             }
             return JSON.stringify({ action: 'tool', name: 'list_tasks', args: {} });
@@ -107,7 +129,41 @@ for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event
         if (mode === 'manual-pause') {
             assert.equal(result.status, 'paused'); assert.equal(runtime.snapshot().runs[0].paused, true);
             assert(runtime.snapshot().tasks.every(task => task.status === 'running'));
-        } else if (['blocked-dependency', 'paused-recipient'].includes(mode)) {
+        } else if(['blocked-dependency','blocked-peer-running'].includes(mode)) {
+            const waitUntil=async status=>{
+                const deadline=Date.now()+2500;
+                while(controller.status()!==status && Date.now()<deadline)await new Promise(r=>setTimeout(r,5));
+                assert.equal(controller.status(),status,preset+': '+mode);
+            };
+            assert.equal(result.status,mode==='blocked-peer-running'?'waiting_team':'waiting_user');
+            assert.equal(runtime.snapshot().runs[0].status,'active');
+            if(mode==='blocked-peer-running') {
+                taken.splice(0,taken.length,...taken.filter(item=>runtime.snapshot().tasks.find(t=>t.id===item.task.id).status==='running'));
+                finishWorkers();taken.length=0;deliverEvents();
+                await waitUntil('waiting_user');
+            } else taken.length=0;
+            assert(controller.snapshot().result.teamRecovery,'automatic recovery wait is distinct from a user question');
+            const before=requests;
+            call('a','message',{runId:'wait-run',blueprintVersion:1,recipient:'lead',text:'收到，保持待命，无需回复'});
+            deliverEvents();await Promise.all(eventPromises);
+            await new Promise(r=>setTimeout(r,25));
+            assert.equal(requests,before,'acknowledgements do not wake a blocked recovery');
+            assert(!runtime.snapshot().tasks.some(t=>t.status==='cancelled'));
+            const blocked=runtime.snapshot().tasks.find(t=>t.status==='blocked');
+            call('lead','reassign',{runId:'wait-run',blueprintVersion:1,taskId:blocked.id,recipient:'a'});
+            deliverEvents();
+            // Actual task changes wake the saved run; no user message is needed.
+            await waitUntil('waiting_team');
+            const restored=call('a','take_task');assert(restored);taken.push(restored);
+            finishWorkers();taken.length=0;
+            const dependent=call('b','take_task');if(dependent){taken.push(dependent);finishWorkers();taken.length=0;}
+            deliverEvents();await Promise.all(eventPromises);
+            await waitUntil('completed');
+            assert.equal(runtime.snapshot().runs[0].status,'completed');
+        } else if(mode==='recover-blocked') {
+            assert.equal(result.status,'completed');assert.equal(runtime.snapshot().runs[0].status,'completed');
+            assert.equal(runtime.snapshot().tasks.find(t=>t.key==='a').attempt,2);
+        } else if (mode==='paused-recipient') {
             assert.equal(result.status, 'failed', 'a queue blocked on failed support must not wait forever');
         } else {
             assert.equal(result.status, 'waiting_team', mode + ': ' + result.reason);
@@ -139,4 +195,4 @@ for (const mode of ['polling', 'queued', 'request-budget', 'time-budget', 'event
         assert.deepEqual(errors, []);
     } finally { client.close(); runtime.close(); }
 }
-console.log('Coordinator waiting checks passed: polling and budgets preserve worker leases, event-race wakeup, manual pause and blocked dependency handling.');
+console.log('Coordinator waiting checks passed (centralized and peers): polling and budgets preserve worker leases, event-race wakeup, manual pause and blocked dependency handling.');

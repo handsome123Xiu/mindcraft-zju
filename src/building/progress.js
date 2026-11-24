@@ -17,6 +17,7 @@ export function createProgressTracker(job, world) {
     }
     function sample(action, output) {
         const facts = [
+            observe('blackboard', job.blackboardSeenRevision),
             observe('placed', job.placed), observe('removed', job.removed),
             observe('position', world.snapshot().position?.map(Math.floor)),
             observe('blueprint', job.assignment?.blueprint.blocks),
@@ -33,6 +34,11 @@ export function createProgressTracker(job, world) {
         if (['inspect_block', 'inspect_blueprint', 'inspect_part', 'list_materials'].includes(action?.name) && output && output.status !== 'error') {
             facts.push(observe(action.name, output));
         }
+        if(action?.name==='read_blackboard'&&output?.status==='observed') facts.push(observe('blackboardRead',output));
+        if(job.teamContext?.blackboard && action?.name==='claim_part' && output?.status==='claimed') {
+            facts.push(observe('blackboardLease',[output.partId,output.blueprintVersion,output.owner,output.token]));
+        }
+        for(const step of output?.steps??[]) if(step.name==='read_blackboard'&&step.status==='ok') facts.push(observe('blackboardRead',step.result));
         // Dispatch/consent is real progress even before the next runtime refresh.
         const teamResult = result => {
             if (result?.taskId) facts.push(observe('task:' + result.taskId, [result.status, result.taskId]));

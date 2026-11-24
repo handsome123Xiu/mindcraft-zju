@@ -132,6 +132,7 @@ export function createTeamClient({ name, spec, channel = process, onError = erro
             if (currentTask) job.teamTask = currentTask;
             return result;
         },
+        blackboard: (job, operation, args = {}) => send('blackboard_' + operation, { ...scope(job), ...args }),
         delegateSite: (job, args) => send('delegate_site', { ...scope(job), ...args }),
         async delegate(job, args) {
             const { currentTask, ...result } = await send('delegate', { ...scope(job), ...args });

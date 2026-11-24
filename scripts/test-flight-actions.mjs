@@ -175,12 +175,44 @@ function fixture(options = {}) {
     const corrected = fixture({ onStep(bot) { bot.entity.position.set(0.5, 0, 0.5); bot.emit('forcedMove'); } });
     assert.equal(await corrected.flight.flyTo([0, 12, 0]), false);
     assert.equal(corrected.positions.length, 1);
+    assert.equal(corrected.flight.lastFailure(),'server_correction');
+    assert.equal(corrected.flight.isFlying(),false,'server correction releases stale hover');
+    assert.equal(corrected.bot.physicsEnabled,true);
+    assert.equal(corrected.bot.physics.gravity,0.08);
     const expired = fixture({ timeoutMs: 0 });
     assert.equal(await expired.flight.flyTo([0, 12, 0]), false);
+    assert.equal(expired.flight.isFlying(),false,'timeout restores normal movement too');
     f.bot.game.gameMode = 'survival';
     f.bot.emit('game');
     assert.equal(f.flight.isFlying(), false);
     assert.equal(f.bot.physicsEnabled, true);
+}
+
+// Enabling the escape fallback must not disable collision checks on an ordinary
+// clear route. Another worker may build a block while the bot is in flight.
+{
+    const f=fixture({passThroughWalls:true,onStep(bot,blocks){blocks.set('0,3,0','stone');}});
+    assert.equal(await f.flight.flyTo([0,12,0]),false);
+    assert.equal(f.flight.lastFailure(),'route_changed');
+    assert(f.positions.every(p=>f.flight.canOccupy([p.x,p.y,p.z])));
+    assert.equal(f.flight.isFlying(),false);
+    assert.equal(f.bot.physicsEnabled,true);
+}
+
+// Regression for the live top-layer stall: after a corrected flight the real
+// world adapter must be able to use ground navigation again, without reconnect.
+{
+    let correctOnce=true,walks=0;
+    const f=fixture({onStep(bot){if(correctOnce){correctOnce=false;bot.entity.position.set(.5,0,.5);bot.emit('forcedMove');}}});
+    const world=createMineflayerWorld(f.bot,{flightOptions:{wait:f.wait}});
+    assert.equal(await world.flyTo([0,12,0]),false);
+    assert.equal(world.snapshot().flying,false);
+    assert.equal(f.bot.physicsEnabled,true);
+    assert.equal(world.snapshot().navigation.reason,'server_correction');
+    f.bot.pathfinder.goto=async goal=>{walks++;f.bot.entity.position.set(goal.x+.5,goal.y,goal.z+.5);};
+    assert.equal(await world.moveTo([2,0,0]),true);
+    assert.equal(walks,1,'walking is not bypassed by failed-flight state');
+    assert.equal(world.snapshot().flying,false);
 }
 
 // Exercise the real Mineflayer world adapter and GoalPlaceBlock against a high

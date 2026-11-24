@@ -366,12 +366,45 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     } finally { f.runtime.close(); }
 }
 
+// Inspection handoff is explicit, completion-only and safe to retry after repair.
+{
+    const config=TEAM_PRESETS.pipeline(['designer','builder1','builder2','acceptor']);
+    const f=fixture(config);
+    try {
+        const a=f.call('designer','delegate',delegate('a','builder1',[[0,0,0],[1,0,0],[2,0,0],[3,0,0]]));
+        const b=f.call('designer','delegate',delegate('b','builder2',[[4,0,0],[5,0,0],[6,0,0],[7,0,0]]));
+        const first=f.call('builder1','take_task');f.finish('builder1',first.task,4);
+        const second=f.call('builder2','take_task');
+        f.call('builder2','task_result',{...scopeOf(second.task),status:'blocked',summary:'movement unavailable'});
+        assert(!f.runtime.snapshot().tasks.some(t=>t.kind==='acceptance'),'blocked is not a successful handoff');
+        f.call('designer','reassign',{runId:'run',blueprintVersion:1,taskId:b.taskId,recipient:'builder2'});
+        const restored=f.call('builder2','take_task');f.finish('builder2',restored.task,4);
+        const acceptance=f.call('acceptor','take_task');assert(acceptance);
+        assert.throws(()=>f.call('acceptor','assert_write',{...scopeOf(acceptance.task),partId:'part-1',positions:[[0,0,0]]}),/施工权限/);
+        f.call('acceptor','task_result',{...scopeOf(acceptance.task),status:'blocked',summary:'difference at 0,0,0'});
+        const repair=f.call('designer','delegate',delegate('repair','builder1',[[0,0,0]]));
+        const team={runtime:true,self:'builder2',spec:()=>config,
+            reassign:(job,args)=>f.call('builder2','reassign',{runId:'run',blueprintVersion:1,...args})};
+        const job={teamRunId:'run',teamCoordination:true,owner:'tester',request:'recover inspection',
+            origin:[0,0,0],dimension:'overworld',placed:{},removed:{},events:[{name:'get_tool_help',output:{name:'reassign_task'}}],plan:{steps:[],requirements:[]}};
+        const protocol=decisionInstructions(job,team,'builder2');
+        assert(protocol.nativeFunctions.some(fn=>fn.name==='reassign_task'),'the source can recover its inspection in a coordination turn');
+        const tools=createBuildingTools({team,job,world:{snapshot:()=>({dimension:'overworld'}),read:()=> 'stone'}});
+        await tools.call('reassign_task',{taskId:acceptance.task.id,recipient:'acceptor'});
+        assert.equal(f.call('acceptor','take_task'),null,'new repair work must finish before re-inspection');
+        const repairTask=f.call('builder1','take_task');assert.equal(repairTask.task.id,repair.taskId);
+        f.finish('builder1',repairTask.task,1);
+        assert(f.call('acceptor','take_task'),'the existing inspection becomes runnable after repair');
+        assert.equal(f.runtime.snapshot().tasks.filter(t=>t.kind==='acceptance').length,1);
+    } finally { f.runtime.close(); }
+}
+
 // Pipeline (designer -> builder -> acceptor, no lead) drives the real clients and
 // scoped building tools without entry approval; the acceptor finishes the run itself.
 {
     const template = TEAM_PRESETS.pipeline(['designer', 'builder1', 'builder2', 'acceptor']);
     const stale = structuredClone(template);
-    for (const node of Object.values(stale.agents)) delete node.taskAfter;
+    for (const node of Object.values(stale.agents)) { delete node.taskAfter; delete node.taskAcceptanceTo; }
     const { spec: pipeline, preserved } = preserveTaskDependencies(stale, template);
     assert.deepEqual(preserved, ['builder2', 'acceptor']);
     assert.equal(stale.agents.builder2.taskAfter, undefined, 'save reconciliation must not mutate the request');
@@ -391,7 +424,16 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     assert.equal(pipeline.agents.builder1.taskReportTo, 'builder2');
     assert.equal(pipeline.agents.builder2.taskReportTo, 'acceptor');
     assert.equal(pipeline.agents.acceptor.taskAfter, 'builder2');
-    assert.equal(pipeline.edges.length, 5);
+    assert.equal(pipeline.edges.length, 4);
+    assert(!edgeAllows(pipeline,'designer','acceptor'),'the preset has no direct design/acceptance channel');
+    assert.equal(pipeline.agents.builder2.taskAcceptanceTo,'acceptor');
+    assert(!actionAllowed(pipeline,'acceptor','delegate_task').allowed,'inspection needs no dispatch permission');
+    const unsafe=structuredClone(pipeline);
+    unsafe.agents.acceptor.permissions.allow.push('place_row');
+    assert(!validateTeamSpec(unsafe).ok,'automatic inspection handoff cannot grant writes');
+    const disconnected=structuredClone(pipeline);
+    disconnected.edges=disconnected.edges.filter(e=>![e.from,e.to].includes('acceptor'));
+    assert(!validateTeamSpec(disconnected).ok,'handoff target must have an actual relationship');
     const cyclic = structuredClone(pipeline);
     cyclic.agents.builder1.taskAfter = 'builder2';
     assert(!validateTeamSpec(cyclic).ok, 'workflow prerequisites cannot contain a cycle');
@@ -430,17 +472,19 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
             await new Promise(resolve => setTimeout(resolve, 20));
         }
     };
-    let releaseFirst;
+    let releaseFirst, releaseInspection;
     const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+    const inspectionGate = new Promise(resolve => { releaseInspection = resolve; });
+    const completedSources = [];
     try {
         assert.throws(() => call('designer', 'finish_run', { runId: 'run' }), /缺少全局验收权限/, 'the designer cannot finish the run');
-        const stage1 = call('designer', 'delegate', delegate('stage-1', 'builder1', [[0,0,0], [1,0,0]]));
-        assert.throws(() => call('designer', 'delegate', delegate('acceptance-too-early', 'acceptor', [[4,0,0]])), /taskAfter/, 'the acceptance task must wait for the last stage');
-        const stage2 = call('designer', 'delegate', delegate('stage-2', 'builder2', [[2,0,0], [3,0,0]]));
-        const acceptance = call('designer', 'delegate', delegate('acceptance', 'acceptor', [[4,0,0], [5,0,0], [6,0,0], [7,0,0]]));
+        assert.throws(()=>call('designer','message',{runId:'run',recipient:'acceptor',text:'direct message'}),/连线/);
+        assert.throws(()=>call('designer','delegate',delegate('acceptance','acceptor')),/连线/);
+        const stage1 = call('designer', 'delegate', delegate('stage-1', 'builder1', [[0,0,0], [1,0,0], [2,0,0], [3,0,0]]));
+        const stage2 = call('designer', 'delegate', delegate('stage-2', 'builder2', [[4,0,0], [5,0,0], [6,0,0], [7,0,0]]));
         const queued = f.runtime.snapshot().tasks;
         assert.deepEqual(queued.find(task => task.to === 'builder2').dependsOn, [stage1.taskId]);
-        assert.deepEqual(queued.find(task => task.to === 'acceptor').dependsOn, [stage2.taskId]);
+        assert(!queued.some(task=>task.to==='acceptor'),'inspection is not queued by the designer');
         requests.length = 0;
         for (const name of ['builder1', 'builder2', 'acceptor']) {
             const channel = new EventEmitter();
@@ -474,12 +518,23 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
                     if (name === 'acceptor') {
                         // The acceptance stage inspects the whole site and then
                         // finishes the run itself, settling its own running task.
-                        await tools.call('inspect_build', {});
-                        await team.finish(job);
+                        await inspectionGate;
+                        const loop=createBuildingLoop({team,agentName:name,world,save:async()=>{},
+                            model:{async sendRequest(turns){
+                                const context=JSON.parse(turns[0].content);
+                                if(!context.plan.steps.length)return JSON.stringify({action:'update_plan',steps:[{id:'inspect',title:'核验全场',success:'8格全部核验通过'}]});
+                                if(!context.lastInspection)return JSON.stringify({action:'tool',name:'inspect_build',args:{}});
+                                assert.equal(context.lastInspection.verified,8,'inspection covers every construction stage');
+                                if(context.plan.steps.some(step=>step.status!=='done'))return JSON.stringify({action:'update_plan',patch:true,steps:[{id:'inspect',status:'done',evidence:'全场8格均符合蓝图'}]});
+                                return JSON.stringify({action:'finish',summary:'全场核验通过',requirementReview:context.plan.requirements.map(item=>({requirementId:item.id,satisfied:true,evidence:'全场8格现场核验无差异'}))});
+                            }}});
+                        const result=await loop.acceptTask({task,run});
+                        assert.equal(result.status,'completed','the real acceptance loop submits finish');
                     } else {
                         for (const position of task.scope.positions) {
                             await tools.call('place_block', { position, block: 'stone', partId: 'part-1', assignmentVersion: 1 });
                         }
+                        completedSources.push(task);
                         await team.settle(job, { status: 'completed', summary: name + ' 现场 remaining=0',
                             teamEvidence: tools.inspectTask() });
                     }
@@ -494,6 +549,17 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
         assert.equal(call('designer', 'inbox').length, 0, 'the designer stays asleep while stages run');
         requests.length = 0;
         releaseFirst();
+        await until(()=>started.includes('acceptor'));
+        const inspection=f.runtime.snapshot().tasks.find(task=>task.kind==='acceptance');
+        assert.equal(inspection.from,'builder2');
+        assert.equal(inspection.sourceTaskId,stage2.taskId);
+        assert.equal(inspection.parentId,undefined,'inspection must not become a child waiting on its parent');
+        assert.deepEqual(inspection.dependsOn,[stage1.taskId,stage2.taskId]);
+        const last=completedSources.find(task=>task.to==='builder2');
+        const retry=call('builder2','task_result',{...scopeOf(last),status:'completed',summary:'retry',evidence:[{partId:'part-1',total:4,remaining:0}]});
+        assert.equal(retry.acceptanceTaskId,inspection.id);
+        assert.equal(f.runtime.snapshot().tasks.filter(task=>task.kind==='acceptance').length,1,'retried completion creates one inspection');
+        releaseInspection();
         await until(() => f.runtime.snapshot().tasks.every(task => task.status === 'completed'));
         await until(() => events.some(event => event.recipient === 'builder2' && event.kind === 'task_result'));
         assert.deepEqual(started, ['builder1', 'builder2', 'acceptor']);
@@ -506,7 +572,7 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
         // finish_run 由验收者自己执行：工程结束后消息队列被清空，designer 的
         // inbox 不再持有验收结果（旧流水线里这是 lead 的必收事件）。
         assert.deepEqual(call('designer', 'inbox'), []);
-        assert.equal(cells.size, 4);
+        assert.equal(cells.size, 8);
         for (const [speaker, recipient] of [['builder1', 'builder2'], ['builder2', 'acceptor']]) {
             assert(chat.some(item => item.speaker === speaker && item.text.includes('[-> ' + recipient + ']') && item.text.includes('阶段交付')),
                 speaker + ' hands over to ' + recipient);
@@ -517,7 +583,7 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
         assert(chat.some(item => item.text.includes('整体验收通过')), 'finish_run is announced on the game chat');
         assert.deepEqual(errors, []);
     } finally {
-        releaseFirst();
+        releaseFirst(); releaseInspection();
         for (const client of clients) client.close();
         f.runtime.close();
     }
@@ -684,39 +750,17 @@ assert(!actionAllowed(spec, 'leaf', 'delegate_task').allowed, 'relationship pros
     } finally { f.runtime.close(); }
 }
 {
-    const f = fixture(TEAM_PRESETS.blackboard());
-    const board = name => f.call(name, 'context', { runId: 'run' }).tasks;
-    const dispatch = (area, prep, x) => {
-        const record = board('lead').find(item => item.to === prep);
-        if (record.status !== 'completed') return null;
-        return f.call('lead', 'delegate', delegate('finish-' + area, 'finisher', [[x,0,0]], {
-            description: '依据准备条目 ' + record.id + '：' + record.summary
-        }));
-    };
-    try {
-        f.call('lead', 'delegate', delegate('prep-a', 'prep_a', [[0,0,0]]));
-        f.call('lead', 'delegate', delegate('prep-b', 'prep_b', [[4,0,0]]));
-        const a = f.call('prep_a', 'take_task').task;
-        const b = f.call('prep_b', 'take_task').task;
-        f.call('prep_a', 'task_result', { ...scopeOf(a), status: 'blocked', summary: 'A 区入口被挡，坐标 0,0,0' });
-        f.finish('prep_b', b, 1);
-        assert.deepEqual(board('finisher').map(task => [task.key, task.status]), [['prep-a', 'blocked'], ['prep-b', 'completed']]);
-        assert.match(board('finisher')[0].summary, /入口被挡/);
-        assert.equal(board('finisher')[1].evidence[0].remaining, 0);
-        assert.equal(dispatch('a', 'prep_a', 1), null);
-        dispatch('b', 'prep_b', 5);
-        const finishB = f.call('finisher', 'take_task').task;
-        assert.match(finishB.description, new RegExp(b.id));
-        f.finish('finisher', finishB, 1);
-        f.call('lead', 'reassign', { runId: 'run', taskId: a.id, recipient: 'prep_a' });
-        f.finish('prep_a', f.call('prep_a', 'take_task').task, 1);
-        dispatch('a', 'prep_a', 1);
-        f.finish('finisher', f.call('finisher', 'take_task').task, 1);
-        assert.equal(f.call('lead', 'finish_run', { runId: 'run' }).status, 'completed');
-    } finally { f.runtime.close(); }
+    const board=TEAM_PRESETS.blackboard();
+    assert.equal(board.entryAgent,'builder');
+    assert.equal(board.modules.blackboard.enabled,true);
+    assert.equal(Object.keys(board.agents).length,6);
+    assert.equal(board.edges.length,0,'resource access never grants direct messaging');
+    assert(validateTeamSpec(board).ok);
+    for(const name of Object.keys(board.agents)) assert(actionAllowed(board,name,'read_blackboard').allowed);
 }
+
 {
-    // Swarm: independent blueprints. The entry only assigns sites; every member
+// Swarm: independent blueprints. The entry only assigns sites; every member
     // decides its own design and location inside its site and stops on its own.
     const f = fixture(TEAM_PRESETS.swarm(), ':memory:', false);
     try {

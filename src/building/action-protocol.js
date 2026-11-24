@@ -17,6 +17,10 @@ const cube = { origin: vector, size: { ...integer, minimum: 1, maximum: 32 } };
 const taskScope = object({ region, positions: { ...array(vector, 4096), minItems: 1 } });
 
 export const TOOL_SCHEMAS = Object.freeze({
+    read_blackboard: object({ sinceRevision: { ...integer, minimum: 0 }, prefix: { type:'string', maxLength:100 }, draftId:string, ...paging }),
+    write_blackboard: object({ key: { ...string, maxLength:100 }, content:{type:'string',minLength:1,maxLength:12000}, expectedRevision:{...integer,minimum:0} }, ['key','content']),
+    wait_for_blackboard: object({ sinceRevision:{...integer,minimum:0} }),
+    blueprint_blackboard: object({ operation:{enum:['draft','revise','publish','request_revision']}, brief:string, baseDraftId:string, draftId:string }, ['operation']),
     get_tool_help: object({ name: string }, ['name']),
     delegate_site: object({ recipient: string, origin: vector, region }, ['recipient', 'origin', 'region']),
     prepare_parallel_build: object({ axis: { enum: ['auto', 'x', 'z'] } }),

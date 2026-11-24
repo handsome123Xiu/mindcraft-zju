@@ -1,5 +1,5 @@
 // Summarize accepted team operations for the player, outside the agent's inbox.
-const observed = new Set(['message', 'publish', 'delegate', 'delegate_site', 'prepare_parallel', 'take_task', 'task_result',
+const observed = new Set(['blackboard_read','blackboard_write','blackboard_save_draft','blackboard_publish','blackboard_request_revision','message', 'publish', 'delegate', 'delegate_site', 'prepare_parallel', 'take_task', 'task_result',
     'reassign', 'propose_share', 'respond_share', 'commit_share', 'finish_run', 'cancel_run', 'fail_run']);
 const taskStatus = { completed: '完工', blocked: '阻塞', cancelled: '取消' };
 const short = id => id.slice(0, 8);
@@ -39,6 +39,11 @@ export function createTeamTranscript({ snapshot, log, notify }) {
         const address = (to, text, key) => speak('[-> ' + to + '] ' + text, key);
         const taskLine = (label, item) => '[' + label + ' ' + describeTask(item) + ']';
 
+        if(method.startsWith('blackboard_')) {
+            if(method==='blackboard_read') return speak('[黑板读取] v'+result.revision+(args.draftId?' 草稿 '+short(args.draftId):''));
+            if(method==='blackboard_write') return speak('[黑板发布] '+args.key+' '+args.content.replace(/\s+/g,' ').slice(0,180),'board:'+result.revision);
+            return speak('[蓝图黑板] '+method.replace('blackboard_','')+' '+(result.draftId?short(result.draftId):'')+' '+(args.reason??''),'board-op:'+method+':'+(result.revision??result.assignmentVersion??result.draftId));
+        }
         switch (method) {
             case 'message': {
                 if (args.recipient) return address(args.recipient, args.text);

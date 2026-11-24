@@ -169,6 +169,8 @@
       <div class="row" style="margin-top:10px">
         <div><label>方块数量上限（可选，竞争约束）</label><input id="blockLimit" type="number" min="1" max="2000000" placeholder="例如 200；留空不限制"></div>
       </div>
+      <label><input id="blackboardEnabled" type="checkbox"> 启用共享黑板模块（通用资源，成员还需显式读写权限）</label>
+      <p id="blackboardHint" class="muted"></p>
       <label>这位伙伴负责什么？</label><textarea id="nodeInstructions" rows="2" maxlength="2000" placeholder="例如：优先处理地基和墙体，遇到阻碍报告具体坐标。"></textarea>
       <p class="hintbox" style="margin-top:10px">连线允许双方协作，关系说明决定如何配合；角色名和关系文字不会授予权限。选中成员后勾选可用工具。任务顺序需由 Agent 登记依赖；文字中的审批或投票约定不等于强制执行门槛。保存修改对新工程生效。</p>
       <p id="canvasValidation" class="muted" style="margin:8px 0 0"></p>
@@ -182,6 +184,7 @@
       <h2>施工占用</h2>
       <table id="claimsTable"><thead><tr><th>部件</th><th>持有者</th><th>过期时间</th></tr></thead><tbody></tbody></table>
     </div>
+    <div class="card"><h2>共享黑板</h2><p id="blackboardRuntimeStatus" class="muted">未启用共享黑板</p><div id="blackboardEntries"></div></div>
     <div class="card tasks-card"><h2>任务进展</h2><table id="teamTasks"><thead><tr><th>任务</th><th>执行者</th><th>模块与自行施工范围</th><th>依赖 / 协作来源</th><th>状态</th><th>结果</th></tr></thead><tbody></tbody></table></div>
     <div class="card"><h2>协作提案</h2><table id="teamProposals"><thead><tr><th>发起者 → 接收者</th><th>工作与范围</th><th>状态</th></tr></thead><tbody></tbody></table></div>
 </div>
@@ -374,7 +377,7 @@ const ROLE_PALETTE = ['#8c70a5', '#488f83', '#a87b32', '#bb785a', '#698844', '#4
 const ROLE_LABELS = {
   lead: '工程入口', builder: '施工成员', inspector: '检查员', router: '路由员',
   candidate: '候选者', voter: '投票者', stage_builder: '阶段施工', module_builder: '独立施工',
-  designer: '蓝图设计', acceptor: '验收成员', relay: '接力成员', swarm: '群体并行',
+  board_designer: '黑板设计', board_builder: '独立施工', designer: '蓝图设计', acceptor: '验收成员', relay: '接力成员', swarm: '群体并行',
   preparer: '基础准备', finisher: '后续施工'
 };
 const roleColor = role => role === 'lead' ? '#397a91' : role === 'inspector' ? '#688f42' : role === 'builder' ? '#8f7458'
@@ -439,6 +442,19 @@ function render() {
   svg.append(defs);
   $('#emptyState').style.display = agentNames().length ? 'none' : 'flex';
   renderLegend();
+  if (graph.modules?.blackboard?.enabled) {
+    const box=svg.getBoundingClientRect(), x=(box.width||800)/2, y=(box.height||460)*(box.width<480?0.62:0.51);
+    for (const a of Object.values(graph.agents)) if(a.permissions?.allow?.includes('read_blackboard')) {
+      const line=document.createElementNS('http://www.w3.org/2000/svg','line');
+      for(const [k,v]of Object.entries({x1:a.x,y1:a.y,x2:x,y2:y,stroke:'#8598a8','stroke-dasharray':'5 5','stroke-width':1.5}))line.setAttribute(k,v);
+      line.dataset.resource='blackboard';svg.append(line);
+    }
+    const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');
+    for(const [k,v]of Object.entries({x:x-62,y:y-22,width:124,height:44,rx:10,fill:'#edf6f0',stroke:'#5c8b76'}))rect.setAttribute(k,v);
+    rect.dataset.resource='blackboard';svg.append(rect);
+    const text=document.createElementNS('http://www.w3.org/2000/svg','text');
+    text.setAttribute('x',x);text.setAttribute('y',y+5);text.setAttribute('text-anchor','middle');text.setAttribute('fill','#315343');text.textContent='共享黑板 · 资源';svg.append(text);
+  }
   const edgeTrim = (from, to) => {
     const dx = to.x - from.x, dy = to.y - from.y;
     const len = Math.hypot(dx, dy) || 1;
@@ -623,6 +639,7 @@ svg.ondblclick = event => {
 
 // ===== 权限矩阵 =====
 let knownTools = [];
+const boardToolNames = new Set(['read_blackboard','write_blackboard','wait_for_blackboard','blueprint_blackboard']);
 function buildPermGrid() {
   knownTools = catalogTools.length ? catalogTools : Object.values(TOOL_GROUPS).flat();
   const grouped = new Map(Object.entries(TOOL_GROUPS));
@@ -651,7 +668,8 @@ function fillPermPanel(agent) {
   const denied = new Set(p.deny ?? []);
   $('#permGrid').querySelectorAll('[data-perm]').forEach(box => {
     const tool = box.dataset.perm;
-    box.checked = p.whitelistOnly ? allowed.has(tool) : (allowed.has('*') || allowed.has(tool)) && !denied.has(tool);
+    box.checked = boardToolNames.has(tool) ? allowed.has(tool) && !denied.has(tool) :
+      p.whitelistOnly ? allowed.has(tool) : (allowed.has('*') || allowed.has(tool)) && !denied.has(tool);
   });
   $('#capFinish').checked = p.finishGate === true;
   $('#capWhitelist').checked = p.whitelistOnly === true;
@@ -663,7 +681,7 @@ function writePermissions() {
     const checked = [...$('#permGrid').querySelectorAll('[data-perm]:checked')].map(b => b.dataset.perm);
     const whitelist = $('#capWhitelist').checked;
     agent.permissions = {
-      ...(whitelist ? { allow: checked, whitelistOnly: true } : { allow: ['*'], deny: knownTools.filter(t => !checked.includes(t)) }),
+      ...(whitelist ? { allow: checked, whitelistOnly: true } : { allow: ['*',...checked.filter(t=>boardToolNames.has(t))], deny: knownTools.filter(t => !checked.includes(t)) }),
       finishGate: $('#capFinish').checked
     };
   }
@@ -714,6 +732,7 @@ for (const [id, key] of [['nodeProfile', 'profile'], ['nodeInstructions', 'instr
     syncToEditor(); markDirty();
   };
 }
+$('#blackboardEnabled').onchange = () => { graph.modules={...(graph.modules??{}),blackboard:{enabled:$('#blackboardEnabled').checked}}; syncToEditor(); render(); markDirty(); };
 $('#teamEntry').onchange = () => { graph.entryAgent = $('#teamEntry').value; syncToEditor(); markDirty(); };
 $('#blockLimit').onchange = () => {
   const value = String($('#blockLimit').value ?? '').trim();
@@ -768,11 +787,13 @@ $('#addAgentBtn').onclick = () => {
 function graphToSpec() {
   return {
     coordination: 'relationships',
+    ...(graph.modules ? { modules: structuredClone(graph.modules) } : {}),
     ...(graph.blueprintMode ? { blueprintMode: graph.blueprintMode } : {}),
     ...(Number.isInteger(graph.blockLimit) && graph.blockLimit > 0 ? { blockLimit: graph.blockLimit } : {}),
     agents: Object.fromEntries(Object.entries(graph.agents).map(([name, a]) => [name, { role: a.role ?? 'builder',
       ...(a.taskReportTo ? { taskReportTo: a.taskReportTo } : {}),
       ...(a.taskAfter !== undefined ? { taskAfter: a.taskAfter } : {}),
+      ...(a.taskAcceptanceTo !== undefined ? { taskAcceptanceTo: a.taskAcceptanceTo } : {}),
       ...(a.profile ? { profile: a.profile } : {}), ...(a.instructions ? { instructions: a.instructions } : {}),
       ...(a.permissions ? { permissions: a.permissions } : {}), position: { x: a.x, y: a.y } }])),
     ...(graph.entryAgent && graph.agents[graph.entryAgent] ? { entryAgent: graph.entryAgent } : {}),
@@ -792,10 +813,10 @@ function specToGraph(spec) {
   const rect = svg.getBoundingClientRect();
   const names = Object.keys(spec.agents);
   const perRow = Math.ceil(Math.sqrt(names.length));
-  graph = { coordination: 'relationships', entryAgent: spec.entryAgent, blueprintMode: spec.blueprintMode, blockLimit: spec.blockLimit,
+  graph = { coordination: 'relationships', modules: spec.modules ? structuredClone(spec.modules) : undefined, entryAgent: spec.entryAgent, blueprintMode: spec.blueprintMode, blockLimit: spec.blockLimit,
     edges: (spec.edges ?? []).map(({ from, to, description, label, note }) => ({ from, to, description, ...(label ? { label } : {}), ...(note ? { note } : {}) })),
     agents: Object.fromEntries(names.map((name, i) => [name, {
-      profile: spec.agents[name].profile, instructions: spec.agents[name].instructions, taskReportTo: spec.agents[name].taskReportTo, taskAfter: spec.agents[name].taskAfter,
+      profile: spec.agents[name].profile, instructions: spec.agents[name].instructions, taskReportTo: spec.agents[name].taskReportTo, taskAfter: spec.agents[name].taskAfter, taskAcceptanceTo: spec.agents[name].taskAcceptanceTo,
       role: spec.agents[name].role ?? 'builder',
       permissions: spec.agents[name].permissions ? structuredClone(spec.agents[name].permissions) : undefined,
       x: spec.agents[name].position?.x ?? (rect.width || 800) / 2 + (i % perRow - (perRow - 1) / 2) * 140,
@@ -810,6 +831,8 @@ function syncToEditor() {
   $('#teamEntry').replaceChildren(...names.map(name => { const option = document.createElement('option'); option.value = name; option.textContent = name; return option; }));
   $('#teamEntry').value = graph.entryAgent ?? names.find(name => ['lead'].includes(graph.agents[name].role) || graph.agents[name].permissions?.finishGate) ?? names[0] ?? '';
   $('#blockLimit').value = graph.blockLimit ?? '';
+  $('#blackboardEnabled').checked = graph.modules?.blackboard?.enabled === true;
+  $('#blackboardHint').textContent = graph.modules?.blackboard?.enabled ? '已启用：虚线表示资源访问，不授予伙伴私信权限。' : '模块关闭；依赖黑板的 Profile 需要启用模块或调整配置。';
 }
 $('#teamEditor').onblur = () => {
   try { specToGraph(JSON.parse($('#teamEditor').value)); markDirty(); }
@@ -828,7 +851,7 @@ const PRESET_POSITIONS = {
   voting: [[0.5, 0.16], [0.12, 0.50], [0.37, 0.50], [0.63, 0.50], [0.88, 0.50], [0.25, 0.76], [0.50, 0.76], [0.75, 0.76]],
   peers: [[0.5, 0.23], [0.24, 0.73], [0.76, 0.73]],
   handoff: [[0.5, 0.2], [0.16, 0.72], [0.5, 0.72], [0.84, 0.72]],
-  blackboard: [[0.5, 0.22], [0.18, 0.55], [0.82, 0.55], [0.5, 0.81]],
+  blackboard: [[0.1,0.2],[0.3,0.2],[0.5,0.2],[0.7,0.2],[0.9,0.2],[0.5,0.82]],
   swarm: [[0.5, 0.2], [0.16, 0.72], [0.5, 0.72], [0.84, 0.72]]
 };
 let presetRequest = 0;
@@ -849,7 +872,8 @@ async function applyTeamPreset(button, reset = false) {
   const rect = svg.getBoundingClientRect();
   const width = rect.width || 800, height = rect.height || 460;
   for (const [index, [name, agent]] of Object.entries(spec.agents).entries()) {
-    const [x, y] = PRESET_POSITIONS[mode][index];
+    const positions=mode==='blackboard'&&width<480 ? [[.14,.15],[.5,.15],[.86,.15],[.3,.4],[.7,.4],[.5,.79]] : PRESET_POSITIONS[mode];
+    const [x, y] = positions[index];
     const horizontalPadding = Math.max(38, name.length * 3.4 + 8);
     agent.position = { x: Math.max(horizontalPadding, Math.min(width - horizontalPadding, width * x)), y: height * y };
   }
@@ -908,10 +932,27 @@ $('#stopTeam').onclick = async () => {
   try { await api('/api/team/stop', { method: 'POST' }); await refreshTeamRuntime(); refreshStatus(); }
   catch (error) { toast(error.message); }
 };
+let blackboardViewKey='';
 async function refreshTeamRuntime() {
   try {
     const state = await api('/api/team/runtime');
     runtimeAgents = Object.fromEntries(state.agents.map(a => [a.name, a]));
+    const boardRun=state.runs?.filter(r=>r.spec?.modules?.blackboard?.enabled).at(-1);
+    const board=boardRun?.blackboard;
+    $('#blackboardRuntimeStatus').textContent=boardRun ? '工程 '+boardRun.id.slice(0,8)+' · 黑板 v'+(board?.revision??0)+' · '+boardRun.status+' · '+(boardRun.designRevisionRequest?'等待设计返修':'已发布草稿 '+(boardRun.publishedDraftId?.slice(0,8)??'无')) : graph.modules?.blackboard?.enabled ? '模块已启用，等待新工程' : '未启用共享黑板';
+    const viewKey=boardRun?.id+':'+(board?.revision??0);
+    if(viewKey!==blackboardViewKey) {
+      blackboardViewKey=viewKey;
+      const opened=new Set([...$('#blackboardEntries').querySelectorAll('details[open]')].map(d=>d.dataset.key));
+      const detail=(key,label,text)=>{
+        const details=document.createElement('details'), summary=document.createElement('summary'), content=document.createElement('pre');
+        details.dataset.key=key;details.open=opened.has(key);summary.textContent=label;
+        content.textContent=text;content.style.whiteSpace='pre-wrap';content.style.overflowWrap='anywhere';details.append(summary,content);return details;
+      };
+      const draft=boardRun?.blueprintDrafts?.items?.[boardRun.blueprintDrafts.latest];
+      $('#blackboardEntries').replaceChildren(...(draft?[detail('current-draft','当前草稿 '+draft.id.slice(0,8)+' · '+draft.author,JSON.stringify({summary:draft.summary,origin:draft.origin,coverage:draft.coverage,shapes:draft.shapes},null,2))]:[]),
+        ...Object.values(board?.entries??{}).sort((a,b)=>b.revision-a.revision).slice(0,30).map(entry=>detail(entry.key,'v'+entry.revision+' · '+entry.author+' · '+entry.key,entry.content)));
+    }
     $('#activeTaskCount').textContent = state.tasks.filter(t => t.status === 'running').length;
     $('#startTeam').disabled = state.running; $('#resumeTeam').disabled = state.running; $('#stopTeam').disabled = !state.running;
     $('#teamStatus').textContent = state.running ? state.agents.map(a => a.name + ': ' + a.status).join(' · ') : '团队未运行；端口使用“控制”页配置。';

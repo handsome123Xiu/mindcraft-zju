@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openTeamStore } from './team-store.js';
 import { TOOL_SCHEMAS } from './action-protocol.js';
+import { BLACKBOARD_TOOLS, blackboardPermission } from './blackboard.js';
 
 export const ROLE_PERMISSIONS = Object.freeze({
     lead: {
@@ -41,6 +42,7 @@ export function roleOf(spec, agentName) {
 }
 
 export function actionAllowed(spec, agentName, toolName) {
+    if (BLACKBOARD_TOOLS.has(toolName)) return {allowed:!!blackboardPermission(spec,agentName,toolName),role:spec?.agents?.[agentName]?.role??'custom'};
     const role = roleOf(spec, agentName);
     const allowed = role.whitelistOnly
         ? role.allow.includes(toolName)
@@ -54,6 +56,13 @@ export function capabilities(spec, agentName) {
     return { name: role.name, canBuild: actionAllowed(spec, agentName, 'place_block').allowed,
         canDelegate: actionAllowed(spec, agentName, spec?.blueprintMode === 'independent' ? 'delegate_site' : 'delegate_task').allowed,
         finishGate: role.finishGate === true };
+}
+
+// A final inspection handoff grants observation and finish, never construction.
+export function isReadOnlyFinisher(spec, name) {
+    return !!spec?.agents?.[name] && capabilities(spec, name).finishGate &&
+        !['design_blueprint', 'blueprint_blackboard', ...Object.keys(TOOL_SCHEMAS).filter(tool => /^(place|dig)_/.test(tool))]
+            .some(tool => actionAllowed(spec, name, tool).allowed);
 }
 
 // Relationship descriptions guide the model; they never grant permissions.
@@ -93,6 +102,11 @@ export function validateTeamSpec(spec) {
         if (entry?.position != null && (!Number.isFinite(entry.position.x) || !Number.isFinite(entry.position.y))) errors.push(name + ' 的画布坐标无效');
         if (entry?.taskReportTo != null && (!names.includes(entry.taskReportTo) ||
             !Array.isArray(spec.edges ?? []) || !edgeAllows(spec, name, entry.taskReportTo))) errors.push(name + ' 的 taskReportTo 必须指向有连线的其他成员');
+        if (entry?.taskAcceptanceTo != null && (spec.blueprintMode === 'independent' ||
+            !names.includes(entry.taskAcceptanceTo) || !edgeAllows(spec, name, entry.taskAcceptanceTo) ||
+            !capabilities(spec, name).canBuild || !isReadOnlyFinisher(spec, entry.taskAcceptanceTo))) {
+            errors.push(name + ' 的 taskAcceptanceTo 必须经连线指向持全局验收权且无设计施工权限的验收成员');
+        }
         if (entry?.taskAfter != null && (!names.includes(entry.taskAfter) ||
             !Array.isArray(spec.edges ?? []) || !edgeAllows(spec, name, entry.taskAfter))) errors.push(name + ' 的 taskAfter 必须指向有连线的前序成员');
         const predecessors = new Set([name]);
@@ -104,6 +118,7 @@ export function validateTeamSpec(spec) {
         }
         if (entry?.instructions != null && (typeof entry.instructions !== 'string' || entry.instructions.length > 2000)) errors.push(name + ' 的职责说明无效');
     }
+    if (spec?.modules?.blackboard != null && (typeof spec.modules.blackboard !== 'object' || typeof spec.modules.blackboard.enabled !== 'boolean')) errors.push('modules.blackboard.enabled 必须是布尔');
     if (spec?.blueprintMode != null && spec.blueprintMode !== 'independent') errors.push('未知 blueprintMode');
     if (spec?.blockLimit != null && (!Number.isInteger(spec.blockLimit) || spec.blockLimit < 1 || spec.blockLimit > 2000000)) errors.push('blockLimit 必须是 1–2000000 的整数');
     if (spec?.entryAgent && !names.includes(spec.entryAgent)) errors.push('团队入口必须是已有成员');
@@ -131,6 +146,12 @@ export function validateTeamSpec(spec) {
             adjacency.get(edge?.from)?.add(edge?.to);
             adjacency.get(edge?.to)?.add(edge?.from);
         }
+        // Shared resource access is independent of peer-message edges. Declaration
+        // remains editable when disabled; availability is checked at execution.
+        if (spec?.modules?.blackboard) {
+            const readers=names.filter(name=>spec.agents[name].permissions?.allow?.includes('read_blackboard'));
+            for (const a of readers) for (const b of readers) if(a!==b) adjacency.get(a).add(b);
+        }
         const seen = new Set([names[0]]);
         const queue = [names[0]];
         while (queue.length) for (const next of adjacency.get(queue.shift()) ?? []) {
@@ -148,7 +169,7 @@ export function validateTeamSpec(spec) {
                     errors.push(name + ' 需要与入口直连且具有独立设计和施工权限');
                 }
             }
-        } else if (!actionAllowed(spec, entry, 'design_blueprint').allowed) {
+        } else if (!actionAllowed(spec, entry, 'design_blueprint').allowed && !(spec.modules?.blackboard && spec.agents[entry].permissions?.allow?.includes('blueprint_blackboard'))) {
             errors.push('本版团队入口需要蓝图设计权限');
         }
         // 验收权独立于入口：固定流水线里验收由专门的验收成员执行。
@@ -166,8 +187,8 @@ const PRESET_INSTRUCTIONS = {
             const builders = stages.join(' → ');
             return [
                 '你是流水线的蓝图设计者，不施工、不验收、不执行 finish。流程：' + builders + ' → ' + acceptor + '（验收）。观察场地，用 update_plan 制定设计与派工计划，再用 design_blueprint 发布共享蓝图。',
-                '蓝图发布后，按流水线顺序一次性 delegate_task 登记全部任务：每位施工成员一段（整部件用 partIds，切分连续区域用 scope.region），最后给 ' + acceptor + ' 登记一个覆盖全部部件的整体验收任务（描述写明"全场核验，零差异后执行 finish"）。运行时依据 taskAfter 自动接续依赖，无需手动填 dependsOn；登记后核对整条链。派工描述写清本段范围、前序支撑及验收条件。',
-                '登记完成后 wait_for_team。施工段的交接由成员 complete_task 自动完成，无需你放行；只有 ' + acceptor + ' 的验收结果会回到你这里。收到阻塞求助或任务超时未领取时，用 list_tasks 核对原因，只对 blocked/queued 的原任务用 reassign_task 恢复，不能重派已 completed 的任务。你的职责在验收任务完成、' + acceptor + ' 执行 finish 后自然结束。',
+                '蓝图发布后，按流水线顺序 delegate_task 登记各施工段：每位施工成员一段（整部件用 partIds，切分连续区域用 scope.region）。运行时依据 taskAfter 自动接续施工依赖，无需手动填 dependsOn。你不向 ' + acceptor + ' 派工或发消息；末段 ' + stages.at(-1) + ' 的 complete_task 成功后，运行时依据 taskAcceptanceTo 正式创建覆盖全场的验收任务。派工描述写清本段范围、前序支撑及验收条件，核对各段合计覆盖全部施工目标。',
+                '登记完成后 wait_for_team，不给后续阶段放行。施工段 complete_task 自动接续，末段把工程交给验收成员。验收问题由末段施工成员转达；只对与你直连的 blocked/queued 施工任务使用 reassign_task，已完成范围需要返工则登记新的明确施工任务，不能重派 completed。验收任务由末段成员负责恢复，不跨连线派工或通信。工程由验收成员 finish 结束。',
                 '恢复已有工程时，先查看已登记任务和现场进度，沿用现版蓝图和原任务，不要重复设计或重复派单。'
             ].join('\n');
         },
@@ -182,24 +203,31 @@ const PRESET_INSTRUCTIONS = {
                 '遇到 entity_in_way 时读取工具给出的 blockers 名称和坐标，向实际挡路者请求一次移动到其工地外待命点；跨连线由相邻成员转达。对同一障碍只发一次请求，收到移动结果或观察到位置改变再重试。有 missing_reference 时核对相邻支撑；真正受阻时用 blocked 提交具体障碍。已有 inspect_part 建议且现场条件满足时，下一步直接执行建议。',
                 '本段完工后，先移到蓝图完整 bounds 外至少 3 格的安全待命点，再现场核验并 complete_task，让出后续施工区域。',
                 '现场自检全部通过后，用 update_plan 标记本段步骤 done 并附证据，然后 complete_task。summary 写清蓝图版本、完成部件、现场 remaining=0、支撑与边界及下一步注意事项。运行时会把这份结果直接交给 ' + recipient + '。' +
-                    (next ? '你在此结束本段，下游依赖自动解除，由 ' + next + ' 接续施工。' : '这是最后一段施工，交付后由 ' + acceptor + ' 对全场进行验收。')
+                    (next ? '你在此结束本段，下游依赖自动解除，由 ' + next + ' 接续施工。' : '这是最后一段施工：complete_task 成功时自动创建全场验收任务，正式交给 ' + acceptor + '，不必额外 delegate_task 或请设计者放行。若之后收到验收差异，把具体坐标与原因转达给设计者安排返工；list_tasks 确认返工任务完成且现场问题已解决后，使用 reassign_task 恢复自己派给验收成员的原验收任务，不重复创建验收任务。')
             ].join('\n');
         },
-        acceptor: designer => [
-            '你是流水线的验收成员，持有全局验收权限（finishGate）。你不施工：没有放置/拆除工具，也不要提议或执行任何方块改动。验收任务自动依赖全部施工任务，最后一个施工段 complete_task 后你会收到交付事件并自动领取验收任务。',
+        acceptor: previous => [
+            '你是流水线的只读验收成员，持有全局验收权限（finishGate）。你不施工、不派工。末段 ' + previous + ' complete_task 成功后，运行时为你创建覆盖全部部件且依赖所有施工任务完成的正式验收任务。领取后立即验收，不等待设计者放行，也不与设计者直接通信。',
             '领取验收任务后，用 update_plan 建立验收计划（每步含 id、title、success），然后 inspect_build 对全场逐格核验（差异多时用 inspect_part / get_build_checklist 分页查看）。',
-            '发现差异时不要修复：用 send_message 向 ' + designer + ' 报告具体差异坐标、期望与实际方块，然后用 blocked 提交验收任务并写明阻塞原因，由设计者安排返工后重新验收。',
+            '发现差异时不要自行修复：用 send_message 向 ' + previous + ' 报告具体差异坐标、期望与实际方块，再用 blocked 提交验收任务并写明原因。由末段成员转达设计者安排返工，返工完成后由末段成员正式重派原验收任务。你只与相连成员直接通信。',
             '零差异时：update_plan 把验收步骤标 done 并附现场证据，然后直接执行 finish。finish 的 requirementReview 按原始要求逐条填写 requirementId、satisfied=true 和 evidence；summary 写清蓝图版本、全场 remaining=0 与验收结论。finish 会现场再次核验并自动结算你的验收任务、结束整个工程。不要用 complete_task 代替 finish——那只是提交任务，工程仍会停留在待验收状态。'
         ].join('\n')
     },
     centralized: {
         entry: [
-            '你是团队派工中心，负责共享蓝图、整体调度和最终验收。观察场地，结合支撑、动线、工作量及成员状态分工。可以分给成员独立模块，也可以在同一模块给不同人清楚且互不重叠的 scope。独立任务先派出，真实依赖用 dependsOn 登记。',
-            '用 wait_for_team 等事件。任务阻塞时核对原因及成员是否可领工，优先恢复或重派原任务。伙伴可直接商量让路或局部分担；你负责调整整体安排。全部任务结算后，按原始目标核验建筑和空位，再 finish。'
+            '你是团队派工中心，负责共享蓝图、整体调度和最终验收。先观察场地并制定整体计划，再设计共享蓝图。结合实际支撑、动线、工作量和成员状态分工；独立范围可并行，有真实支撑依赖的任务不能仅凭文字提前开工。小型分层建筑可把同一人的连续上层与装饰合成一项任务，减少无效交接。',
+            '每项委托的 description、success、partIds 与 scope 必须一致，success 只验收本任务实际拥有的范围。按完整部件分工时可只传准确的 partIds；若指定 region，必须核对它包含所有要交付的格子，不能让描述包含 scope 外的金块或后续层。不得用“先到者为准”解决重叠，也不能通过聊天授权范围外施工。',
+            '真实依赖必须登记 dependsOn：先单独调用 delegate_task 取得前置 taskId，再用该 ID 派发后续任务；不能在同批尚未取得 ID 时凭任务 key 或一句“等对方完成”替代。只有独立任务才合批。下层完成提供支撑后，运行时才应让上层任务被领取。',
+            '发现自己派出的任务 blocked，优先看最新 inspect/任务结果与成员状态，明确故障是缺支撑、实体挡路还是 unreachable/server_correction。先改变站位、移动恢复条件或选择 online=true 且 canAcceptTask=true 的替代成员，再 reassign_task 重派原 taskId。相同位置和做法已重复失败时，不盲目重派给原人。只重派 blocked/queued 任务，不重复新建相同范围；有正在执行且能推进的独立任务时让它继续。',
+            '同伴消息是线索，不覆盖较新的现场事实。对矛盾报告核对具体坐标、方块和 observedAt；执行者自己的 checklist 看不到别人负责的部件，不代表那部分不存在。聊天允许商量让路，正式施工权仍来自任务与租约。存在未处理的 blocked 时不要因为另一个任务标 running 就 wait_for_team，它可能在等阻塞任务提供支撑。只有确有可推进任务且无需你先恢复时才等事件；用户主动暂停的成员需用户恢复。',
+            '全部正式任务完成后，按原始要求 inspect_build 核验全场。零差异后将已由证据证明的验收步骤标 done，再单独 finish 并填写 requirementReview；finish 是最终提交动作，不是验收步骤 done 的前置条件。'
         ].join('\n'),
         member: [
-            '你承接中心分配的施工。收到正式委托后查看 workScope，核验支撑与动线，按蓝图施工。需要同伴让路或配合时，用 send_message 直接联系相关人，说明位置和所需动作。',
-            '用 propose_task_share 提出局部分担，接收人 respond_task_share 接受后再 commit_task_share。空闲时可以回应，接受后 end_turn 等正式任务。交接发起者等协作者完成后核验原范围，再 complete_task；阻塞时给派工人具体坐标和原因。'
+            '你承接中心正式分配的施工。收到委托先读取 workScope 与当前蓝图，计划和验收仅覆盖你的正式范围。自己的 checklist 只列本范围；其他部件没列出不代表蓝图缺失，也不是你需要等待的额外任务。描述若包含范围外要求，向 Lead 说明并以正式范围为准，不把别人的金块或后续层纳入自己的完成条件。',
+            '先 inspect_part 获取缺失格与合法建议，再按支撑顺序施工。正式委托已持有并自动续约租约，不反复 claim_part。真实前置任务应由 Lead 登记 dependsOn；缺少支撑时观察具体坐标并报告依赖，不能靠不断读取自己的 checklist 等别人的部件出现。',
+            '放置 unreachable 或飞行 server_correction 时，先核对实际位置和清晰、有支撑的站位，换接近方向、尝试 land_at/move_to 后再重试；不是重复相同矩形或只改计划标题。两次改变方法仍失败就用 blocked 报告坐标、实际方块、实际位置、动作与原因，让 Lead 正式恢复或重派。报告必须与最新观测一致，不把“第三层未建”写成“第二层未建”。',
+            '需要同伴让路时，用 send_message 说明你实际受阻的坐标和所需动作。收到请求必须真正执行移动并核对位置后再报告已让开，不能只发承诺。局部分担用 propose_task_share，经对方 respond_task_share 接受后再 commit_task_share；只有正式登记转移后的范围才可施工。空闲协调接受后 end_turn 等正式任务。',
+            '本范围与协作者范围完工后，现场核验原委托范围，所有已满足的计划步骤标 done，再单独 complete_task 向派工人交付，附范围、版本和零差异证据。complete_task 是之后的提交动作，不是计划验收步骤 done 的前置条件；不等范围外任务完成。最后移出施工区待命。'
         ].join('\n')
     },
     parallel: {
@@ -216,14 +244,20 @@ const PRESET_INSTRUCTIONS = {
     },
     peers: {
         entry: [
-            '你是平等协作组成员之一，也是对外接单入口：收到用户目标后，先用 broadcast 把目标和场地证据告诉全组，公开讨论分工与由谁设计蓝图。设计者由协商推选（谁合适谁设计，不必是你）；你可以自荐或支持他人，自己也具备设计蓝图的能力。蓝图发布后按协商分工施工，任何成员都可以提议任务和交接范围。所有子任务完成且全组核验通过后，由你做最终验收（entry 职责，不是指挥权）。',
-            '讨论用短消息。还没有施工任务而需要等队友时，先向玩家发一句单行进度，再单独调用 wait_for_user，reason 以【等队友】开头；有施工任务后用 wait_for_team。若被推选的同伴只能协调，请他提交方案，由你按商定方案发布。发布蓝图应单独调用。',
-            '把已经约定的范围尽快登记为正式任务。整部件用 partIds，省略 scope；切分连续区域只填 scope.region，coordinateSpace 放在 scope 外。不要填空的 positions，也不要同时写 region 和 positions。先登记实际前序任务，再用其返回的 taskId 填 dependsOn；如果前序是你自建的范围，先完成并现场验收，再派依赖该支撑的任务。',
-            '模型调用按工具提供的字段填写。派工和修改计划分别调用；wait_for_user、wait_for_team、finish 单独调用。'
+            '你是平等协作组成员之一，也是对外接单入口。先公开原始目标、场地证据和必要约束，与全组协商设计者、施工范围和先后关系。设计者由协商推选，你可以参与设计和施工；最终总体验收是 entry 的职责，不代表你有单方面决定分工的指挥权。设计应符合用户要求，未要求规模时优先提出便于验证的合理规模，避免自行扩大工程。',
+            '协商要收敛：只在提出新方案、反对意见、确认尚未确定的分工或提供新现场事实时发消息。已有一致意见就登记任务并执行。对“收到、已确认、无需回复、保持待命”等无新增信息的消息不回确认，不重复宣布“最后一条”。没有新问题就不要发消息。',
+            '把共同确认的分工登记成正式任务。整部件用 partIds 并省略 scope；局部区域用 scope.region，coordinateSpace 放在 scope 外。先登记支撑或前序任务，再把返回的实际 taskId 填到后续任务 dependsOn。不能只在 description 或聊天里说“等底层完成”；相同成员连续完成多个有依赖的工序也要登记依赖。独立工作无需增加依赖。',
+            '任务 blocked 后先读具体原因，再协商一次可执行的恢复办法。移动失败要核对当前脚部和头部净空、路径与服务端纠正，换有现场依据的站位或执行者；支撑未建好则先恢复前序。由原委托者用 reassign_task 恢复原任务，聊天承诺不会重派任务，也不能解除租约。running 任务不能直接重派，先读其真实状态；你承担总体工程时不要把子任务重派给自己，除非运行时明确允许领取。不能解除时向用户说明事实，保留现场。',
+            '每次发言不必等待所有人再确认。尚未派工而需等待实质提案时，向玩家说明一次进度，再单独 wait_for_user，reason 以【等队友】开头；派工后使用 wait_for_team 等任务事件。若同伴只能协调，由其交方案给你发布。所有正式任务完成后现场验收，补全计划证据并 finish，不重开协商。',
+            '工具按当前提供的名称和字段调用；未提供时先用 get_tool_help 确认和加载，不猜 broadcast、claim_part 或 list_peers 是否可用。send_message 的 recipient 必须是实际队友或玩家名。send_message 成功后先读取结果，下一轮再单独调用 wait_for_user、wait_for_team 或 finish，绝不能与这些结束动作放在同一响应。'
         ].join('\n'),
         member: [
-            '你是平等协作组成员。用 broadcast 或 send_message 与同伴讨论分工、推选蓝图设计者并表达意见；你同样具备设计蓝图的能力，被推选者用 design_blueprint 发布共享蓝图（发布者只负责设计，施工仍按协商分工）。按共享蓝图施工，可以把部分范围正式委托给相连成员，也可以接受同伴的委托。范围或顺序有异议时直接协商，不必等待指派。',
-            '协调回合先用 send_message（recipient 填队友名）发送一条简短主张；若你被推选但当前未提供设计动作，把方案交给入口发布。发完或看到任务已排队后，单独调用 end_turn。正式领到委托后按 workScope 施工，有新的范围、顺序或让路问题时与同伴直接协商。'
+            '你是平等协作组成员。对照原始目标与现场证据，独立提出方案、推选设计者并协商分工；不同意时说明具体理由与替代方案。由协商选定的成员设计共享蓝图；若本回合没有设计工具，提交方案给入口发布。发布者不是施工指挥者，你可与相连同伴直接讨论，并正式委托自己持有范围内的工作。',
+            '只在有新方案、未解决的分歧、范围变更、实际交付或新的阻塞证据时发一条简短消息。收到“确认、收到、无需回复、等待中”且没有新问题时直接 end_turn；不要回复确认，不重复宣布静默或询问相同进度。已达共识就执行正式任务，不继续征求批准。',
+            '协调回合尚无施工任务时不建施工计划、不施工。需要贡献时先单独 send_message，读取发送成功结果后，下一轮只调用 end_turn；没有新信息时直接单独 end_turn。绝不能在同一响应中同时调用 send_message 和 end_turn，也不能调用当前未提供的 wait_for_team 等动作。',
+            '领到正式任务后按 workScope 连续施工，后续工序的 dependsOn 由运行时控制领取。支撑缺失或前序 blocked 时，向原委托者一次说明前序任务 ID、缺失坐标和可行建议；不要越界补队友范围，不用聊天代替正式依赖，不反复查同一空气格。已领取任务若确实无法推进，报告具体阻塞并保留现场。',
+            '需要让路时说明实际受阻位置与需要腾出的区域；收到请求后实际移动并核对位置，再报告结果。移动被 server_correction 拒绝后，不重复同一路线或移动进已有方块，选择已观察的净空与替代路径；若另一个成员有可行站位，提出正式重派建议。只说“我马上施工”不算进展。',
+            '自己范围完成后以 inspect_part 或 inspect_build 的实际结果补全计划，再单独 complete_task；未完成前不要报完成。后续实际交付或阻塞变化发生时再通知相关成员，没有新事实就结束协调回合等待事件。'
         ].join('\n')
     },
     handoff: {
@@ -240,18 +274,21 @@ const PRESET_INSTRUCTIONS = {
         ].join('\n')
     },
     blackboard: {
-        entry: (preparers, finisher) => [
-            '你维护共享任务板上的施工依据。发布蓝图，派 ' + preparers.join('、') + ' 准备两个独立施工区的基础。任务写清区域、准备范围和可现场核验的标准。list_tasks 是共用板面，以正式状态、summary 和 evidence 判断就绪、阻塞或完工。',
-            '哪个基础条目先验收完成且有证据，就给 ' + finisher + ' 派该区后续任务，描述引用准备条目的 taskId 和检查结论。结算当前任务后再派下一个就绪区。遇到阻塞先记录解除条件，让可推进区域继续，障碍解决后恢复原条目。',
-            '要求成员在板上记录变化，消息只用来提醒关注具体条目。等各区准备、后续施工均有验收证据，再核验全场并 finish。'
+        designer: (name, first, focus) => [
+            '你是共享蓝图设计师 '+name+'，重点关注'+focus+'，同时有权修改整份草稿。与同伴没有私信连线，业务信息只读写黑板。先 read_blackboard；需要具体几何时指定 currentDraft.id，按 draft.nextOffset 分页读完 shapes，不能仅凭摘要通过审查。条目有 nextOffset 时继续翻页，审查记录可用 prefix 精确查询。',
+            name===first ? '你本人负责首版草稿。currentDraft=null 时，在读取目标及必要场地依据后，立即单独调用 blueprint_blackboard(operation=draft,brief=设计要求与现场依据)。不等派工，不等其他人起草，不重复读取空黑板。' : '你不负责首稿。currentDraft=null 时，有新现场依据才写一次黑板；否则立即 wait_for_blackboard，不能反复读取空板。首稿出现后主动按自己的职责审查或修订。',
+            '你的审查是独立判断，不需要等其他设计师先批准。读完本版 shapes 后，下一步提交自己的审查或发起具体修订；不要反复查看别人的审查代替自己的工作。审查用简短 JSON 字符串，包含 draftId、approve、evidence 或 issues，通常 100–300 字即可。若本版已有你自己有效的审查且无新问题，直接 wait_for_blackboard。',
+            '黑板还没有草稿时，仅 '+first+' 用 blueprint_blackboard(operation=draft,brief=原始需求与场地依据) 生成初稿，其他人发布必要观察后 wait_for_blackboard。已有草稿时逐项检查原始目标、支撑、范围和材质；需要修改就用 revise(baseDraftId,brief) 生成修订版，版本冲突先读最新版再决定，不盲目重试。',
+            '审查意见写在 review/草稿ID/'+name+'，content 写清 draftId、approve=true 或具体未解决问题及证据。更新自己的同版审查时 expectedRevision 填该条目当前版本；不是全局版本。每次改稿旧审查不再用于新稿。确认为本版无未解决问题才批准；所有设计师都确认同版由 Builder 自主接续，系统不会替你计票、定稿或派工。重复同样意见不算进展。',
+            '看到 publishedDraftId 与当前草稿相同且无 revisionRequest 时直接 end_turn，后续黑板变化会唤醒你。Builder 提交 revisionRequest 后，读取问题和 protected 保留约束，按 protected.nextOffset 分页查阅；基于已发布草稿修订，保留所有已建坐标与方块。无法同时满足保留约束和原始要求时写明冲突并等用户，不擅自拆改。',
+            '设计回合只调用观察、黑板与草稿工具，不施工、不 publish、不 finish。完成本轮贡献后 wait_for_blackboard 或 end_turn；没有新事实不反复改写条目。'
         ].join('\n'),
-        preparer: [
-            '你负责分给你的基础准备条目。按正式任务范围施工并检查支撑及动线，在 complete_task 的 summary 写「区域｜关键坐标｜就绪依据」。如有障碍，用 blocked 在 reason 写清区域、坐标、现状和解除条件。',
-            '队友需要跟进时，用 send_message 提醒查看相应任务 ID。以后续施工者能从 list_tasks 复核证据为准。'
-        ].join('\n'),
-        finisher: [
-            '按共享任务板接续施工。领取委托时，用 list_tasks 对照该区准备任务，读已完成状态及验收依据，抽查现场支撑。证据齐全后再施工。',
-            '用 complete_task 把「区域｜准备任务 ID｜后续施工验收结果」写进条目。若板上资料与现场不符，报告实测坐标和差异，让协调员按记录处理。'
+        builder: designers => [
+            '你是工程接单与唯一施工成员。收到目标先 update_plan 记录用户原始要求和施工验收步骤，观察必要场地，read_blackboard 查看共享设计。你不生成或修改草稿，不私聊设计师。需要补充现场依据或用户追加要求就 write_blackboard，随后 wait_for_blackboard 等设计。',
+            '设计成员为 '+designers.join('、')+'。指定 currentDraft.id，按 draft.nextOffset 分页读完具体 shapes，再用 prefix=review/当前草稿ID/ 查询本版审查，条目 nextOffset 不为空就继续翻页。每位成员的审查必须真实 author 对应本人、content.draftId 对应同一 currentDraft.id、明确批准且无未解决问题，才 blueprint_blackboard(operation=publish,draftId)。设计共识由你按 Profile 检查，工具不强制人数。发布指定草稿，不调用原 design_blueprint 重新生成。',
+            '发布成功后按原有 inspect_part 建议、施工工具与计划独立建造，必要时认领部件租约，施工顺序和移动问题自行处理。若必须改设计，用 blueprint_blackboard(operation=request_revision,brief=具体坐标/预期/现状/失败原因) 保存已建部分并暂停施工；然后 wait_for_blackboard。所有设计师确认新版后 publish 该草稿继续原工程，不重建世界，不拆除已锁定部分。',
+            '施工顺序：inspect_part 得到实际缺失坐标与建议后，claim_part 认领该部件；返回 claimed 后下一步直接执行对应放置建议，不等待别人的开工信号，不重复认领同一部件、不反复取同一份清单。若放置提示缺少租约，认领一次后立即重试刚才的放置。租约由心跳自动续期，重复 claim 不是施工进展。',
+            '收尾顺序：remainingCells=0 后用 inspect_build 全场核验一次；返回 completed、verified=total 且零差异后，把已由现场证据证明的步骤（包括最后的验收步骤）用 update_plan(patch=true) 标 done。finish 是之后单独提交的动作，不应成为验收步骤尚未 done 的前置条件。全部步骤 done 后，下一步立即单独调用 finish，summary 说明成果，requirementReview 按原始要求逐条填写 satisfied 与 evidence；不要再反复 inspect_build、认领或等设计师。实际仍有未满足要求就先处理，不凭蓝图一致宣称全部完成。存在 revisionRequest 时不得结束或继续放置。模块关闭时明确报告需要启用或调整配置。'
         ].join('\n')
     },
     swarm: {
@@ -382,8 +419,6 @@ const ACCEPTOR_PERMISSIONS = {
         'get_tool_help', 'send_message', 'broadcast', 'list_peers', 'list_tasks', 'observe_environment', 'observe_cells',
         'inspect_block', 'look_at', 'move_to', 'fly_to', 'land_at', 'list_materials',
         'inspect_blueprint', 'get_build_checklist', 'inspect_part', 'inspect_build',
-        // delegate_task 仅作为领取验收任务的资格（接收者需 canWork），不得用于派工。
-        'delegate_task'
     ]
 };
 function pipelinePreset(names = ['designer', 'builder', 'acceptor']) {
@@ -398,12 +433,16 @@ function pipelinePreset(names = ['designer', 'builder', 'acceptor']) {
         [designer]: { role: 'designer',
             permissions: { ...DESIGNER_PERMISSIONS, allow: [...DESIGNER_PERMISSIONS.allow] },
             instructions: instructions.entry(stages, acceptor) },
-        ...Object.fromEntries(stages.map((name, i) => [name,
-            { ...scopedBuilder(instructions.stage(i, stages[i - 1], stages[i + 1], acceptor), 'builder'),
-                taskReportTo: stages[i + 1] ?? acceptor, ...(stages[i - 1] ? { taskAfter: stages[i - 1] } : {}) }])),
+        ...Object.fromEntries(stages.map((name, i) => {
+            const node = scopedBuilder(instructions.stage(i, stages[i - 1], stages[i + 1], acceptor), 'builder');
+            if (i === stages.length - 1) node.permissions.deny = node.permissions.deny.filter(tool => tool !== 'reassign_task');
+            return [name, { ...node, taskReportTo: stages[i + 1] ?? acceptor,
+                ...(i === stages.length - 1 ? { taskAcceptanceTo: acceptor } : {}),
+                ...(stages[i - 1] ? { taskAfter: stages[i - 1] } : {}) }];
+        })),
         [acceptor]: { role: 'acceptor',
             permissions: { ...ACCEPTOR_PERMISSIONS, allow: [...ACCEPTOR_PERMISSIONS.allow] },
-            instructions: instructions.acceptor(designer),
+            instructions: instructions.acceptor(stages.at(-1)),
             taskAfter: stages.at(-1) }
     }, [
         ...stages.map((name, i) => relation(designer, name, '设计交底与派单',
@@ -411,9 +450,8 @@ function pipelinePreset(names = ['designer', 'builder', 'acceptor']) {
         ...stages.slice(1).map((name, i) => relation(stages[i], name, '阶段交接',
             stages[i] + ' 用 complete_task 交付现场验收结果与续接条件，运行时直接通知 ' + name + ' 并解除下一段依赖；' + name + ' 自动领取任务，核对现场后开工。')),
         relation(stages.at(-1), acceptor, '完工送验',
-            stages.at(-1) + ' 完成最后一段施工后 complete_task，运行时解除验收任务的依赖并通知 ' + acceptor + '；' + acceptor + ' 自动领取验收任务。'),
-        relation(designer, acceptor, '验收委托',
-            designer + ' 为 ' + acceptor + ' 登记整体验收任务（依赖全部施工任务）。' + acceptor + ' 全场核验，零差异后执行 finish 结束工程；有差异时向 ' + designer + ' 报告并阻塞返工。')
+            stages.at(-1) + ' 完成最后一段施工后 complete_task，运行时正式创建覆盖全场的验收任务并交给 ' + acceptor + '；' + acceptor + ' 自动领取验收任务。'),
+
     ]);
 }
 function parallelPreset(names = ['lead', 'builder1', 'builder2', 'builder3']) {
@@ -456,21 +494,23 @@ function handoffPreset(names = ['entry', 'relay_1', 'relay_2', 'relay_3']) {
     }, fullMesh(names, (from, to) => relation(from, to, '平等接力',
         from + ' 与 ' + to + ' 平等接力：任意一方完成当前步骤后，可自主决定把剩余范围的下一步交给对方或其他成员；交接必须用 delegate_task 正式登记，消息不转移施工权。')));
 }
-function blackboardPreset(names = ['lead', 'prep_a', 'prep_b', 'finisher']) {
-    requireMembers(names, 4, '共享黑板');
-    const [lead, first, second, finisher] = names;
-    const preparers = [first, second];
-    const instructions = PRESET_INSTRUCTIONS.blackboard;
-    return teamSpec(lead, {
-        [lead]: coordinator(instructions.entry(preparers, finisher)),
-        [first]: scopedBuilder(instructions.preparer, 'preparer'),
-        [second]: scopedBuilder(instructions.preparer, 'preparer'),
-        [finisher]: scopedBuilder(instructions.finisher, 'finisher')
-    }, [
-        ...preparers.map(name => relation(lead, name, '记录准备状态',
-            name + ' 把区域的就绪证据或阻塞原因写进任务板，' + lead + ' 查看板面决定后续工作。')),
-        relation(lead, finisher, '依据记录派工', lead + ' 引用已就绪的准备记录派工，' + finisher + ' 复查该条目再施工并更新结果。')
-    ]);
+function blackboardPreset(names = ['designer1','designer2','designer3','designer4','designer5','builder']) {
+    if (!Array.isArray(names) || names.length < 3 || new Set(names).size !== names.length || names.some(name=>typeof name!=='string'||!name)) {
+        throw new Error('共享黑板需要至少两位设计成员和一位施工入口');
+    }
+    const designers=names.slice(0,-1), builder=names.at(-1);
+    const instructions=PRESET_INSTRUCTIONS.blackboard;
+    const shared=['get_tool_help','read_blackboard','write_blackboard','wait_for_blackboard','blueprint_blackboard',
+        'observe_environment','observe_cells','inspect_block','list_materials','move_to','fly_to','land_at'];
+    const focuses=['整体布局与比例','结构与可施工性','材料与层次','功能和细节点缀','原始要求与边界核验'];
+    const spec=teamSpec(builder,{
+        ...Object.fromEntries(designers.map((name,i)=>[name,{role:'board_designer',
+            permissions:{whitelistOnly:true,allow:[...shared],finishGate:false},
+            instructions:instructions.designer(name,designers[0],focuses[i%focuses.length])}])),
+        [builder]:{role:'board_builder',permissions:{allow:['*',...shared],deny:['design_blueprint','delegate_task','delegate_site','broadcast'],finishGate:true},
+            instructions:instructions.builder(designers)}
+    },[]);
+    return {...spec,modules:{blackboard:{enabled:true}}};
 }
 // 群体并行：独立蓝图模式。传令成员只划工地和汇总验收，不设计不施工；
 // 每位成员在自己的工地内自主选址、自主设计、自主搭建、自主决定停止。

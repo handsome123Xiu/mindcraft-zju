@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { blackboardEnabled, blackboardPermission, boardFor, boardDigest } from './blackboard.js';
+import { handleBlackboardRequest } from './blackboard-runtime.js';
 import { isDeepStrictEqual } from 'node:util';
 import { openTeamStore } from './team-store.js';
-import { validateTeamSpec, capabilities, actionAllowed, edgeAllows } from './team-state.js';
+import { validateTeamSpec, capabilities, actionAllowed, edgeAllows, isReadOnlyFinisher } from './team-state.js';
 export { edgeAllows } from './team-state.js';
 import { checklistParts } from './checklist.js';
 import { bounds, coordinates } from './blueprint.js';
@@ -44,7 +46,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
     const live = new Map();
     const peerState = name => ({ name, capabilities: capabilities(spec, name), online: live.has(name), status: live.get(name)?.status ?? 'offline',
         canAcceptTask: live.get(name)?.canAcceptTask === true });
-    const canWork = (spec, name) => capabilities(spec, name).canBuild || capabilities(spec, name).canDelegate;
+    const canWork = (spec, name) => capabilities(spec, name).canBuild || capabilities(spec, name).canDelegate || isReadOnlyFinisher(spec, name);
     const dispatcher = (state, task) => state.tasks[task.parentId]?.to ?? task.from;
     const waitsFor = (state, id, target, seen = new Set()) => {
         if (id === target) return true;
@@ -157,6 +159,31 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
             owner: task.to, session, token: task.token, expiresAt: now() + leaseMs
         };
     }
+    // Optional explicit handoff: completion of a construction task can enqueue
+    // a read-only whole-project inspection. It is not a nested construction
+    // delegation: the source keeps its scope and completes before inspection.
+    function handoffAcceptance(state, run, source) {
+        const to = run.spec.agents[source.to]?.taskAcceptanceTo;
+        if (!to || source.kind === 'acceptance') return null;
+        if (!edgeAllows(run.spec, source.to, to) || !isReadOnlyFinisher(run.spec, to)) {
+            throw new Error('验收交接目标必须相连且仅有只读验收权限');
+        }
+        const existing = Object.values(state.tasks).find(task => task.runId === run.id &&
+            task.blueprintVersion === run.blueprintVersion && task.kind === 'acceptance' && task.to === to);
+        if (existing) return existing.id;
+        const task = { id: randomUUID(), key: 'acceptance:' + to + ':' + run.blueprintVersion,
+            kind: 'acceptance', sourceTaskId: source.id, runId: run.id, blueprintVersion: run.blueprintVersion,
+            from: source.to, to, partIds: parts(run).map(part => part.id), scope: null,
+            dependsOn: Object.values(state.tasks).filter(task => task.runId === run.id &&
+                task.blueprintVersion === run.blueprintVersion && task.kind !== 'acceptance' &&
+                !['cancelled', 'superseded'].includes(task.status)).map(task => task.id),
+            description: '全场只读验收：对照原始要求及当前共享蓝图核验全部部件与预留空位，零差异后执行 finish。',
+            success: '全场核验零差异，原始要求逐项确认，完成验收计划并 finish',
+            status: 'queued', attempt: 0, createdAt: now() };
+        state.tasks[task.id] = task;
+        return task.id;
+    }
+
     function recover(state) {
         for (const [id, claim] of Object.entries(state.claims)) if (claim.expiresAt <= now()) delete state.claims[id];
         for (const task of Object.values(state.tasks)) {
@@ -262,7 +289,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 peer.status = args.status ?? 'idle';
                 peer.canAcceptTask = args.canAcceptTask === true;
             }
-            const readOnly = ['peers', 'context', 'claims', 'assert_write', 'inbox'].includes(method);
+            const readOnly = ['peers', 'context', 'claims', 'assert_write', 'inbox', 'blackboard_read', 'blackboard_wait', 'blackboard_draft_context'].includes(method);
             const execute = readOnly ? fn => structuredClone(fn(current)) : mutate;
             return execute(state => {
                 const run = args.runId && state.runs[args.runId];
@@ -286,6 +313,12 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                         task.token !== args.token || (!task.site && task.blueprintVersion !== run.blueprintVersion)) throw new Error('任务或执行租约已失效');
                     return task;
                 };
+                if (method.startsWith('blackboard_')) {
+                    requireRun();
+                    if (!blackboardEnabled(run.spec)) throw new Error('共享黑板模块未启用');
+                    if (run.paused && !['blackboard_read','blackboard_draft_context'].includes(method)) throw new Error('团队工程已暂停');
+                    return handleBlackboardRequest({state,run,name,method,args,notify,now});
+                }
                 if (method === 'heartbeat') {
                     for (const claim of Object.values(state.claims)) if (claim.owner === name && claim.session === session) claim.expiresAt = now() + leaseMs;
                     for (const task of Object.values(state.tasks)) if (task.to === name && task.session === session && task.status === 'running') task.leaseUntil = now() + leaseMs;
@@ -298,13 +331,19 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     if (!state.runs[id]) state.runs[id] = { id, root: name, owner: text(args.owner, '用户', 16),
                         request: text(args.request, '工程目标'), origin: coordinates(args.origin, '施工原点'),
                         dimension: text(args.dimension, '维度', 100), spec, status: 'active', blueprintVersion: 0 };
+                    const opened=state.runs[id];
+                    if (blackboardEnabled(opened.spec) && !opened.blackboard) {
+                        boardFor(opened);
+                        for (const to of Object.keys(opened.spec.agents)) if(to!==name && blackboardPermission(opened.spec,to,'read_blackboard'))
+                            notify(state,opened,'blackboard',to,'blackboard_update',{revision:0,context:{owner:opened.owner,origin:opened.origin,dimension:opened.dimension,request:opened.request}});
+                    }
                     return { runId: id };
                 }
                 if (method === 'context') {
                     requireRun();
                     const task = args.taskId ? requireTask() : null;
                     const view = task?.site ? task : independent && name !== run.root ? {} : run;
-                    return { tasks: Object.values(state.tasks).filter(t => t.runId === run.id).map(publicTask),
+                    return { ...(blackboardPermission(run.spec,name,'read_blackboard') ? {blackboard:boardDigest(run)} : {}), tasks: Object.values(state.tasks).filter(t => t.runId === run.id).map(publicTask),
                         ...(name === run.root ? { allocation: allocation(state, run) } : {}),
                         ...(view.assignment ? { blueprint: { version: view.blueprintVersion,
                             bounds: view.assignment.blueprint.bounds, blocks: view.assignment.blueprint.blocks.length },
@@ -319,6 +358,9 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     if (!!run.paused !== paused) {
                         run.paused = paused;
                         for (const to of Object.keys(run.spec.agents)) if (to !== name) notify(state, run, name, to, 'control', { action: paused ? 'pause' : 'resume' });
+                        if(!paused && blackboardEnabled(run.spec)) for(const to of Object.keys(run.spec.agents))
+                            if(to!==name && blackboardPermission(run.spec,to,'read_blackboard')) notify(state,run,'blackboard',to,'blackboard_update',{
+                                revision:boardFor(run).revision,context:{owner:run.owner,origin:run.origin,dimension:run.dimension,request:run.request}});
                     }
                     return { status: paused ? 'paused' : 'active' };
                 }
@@ -466,7 +508,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                         const ownKeys = new Set(own.map(c => c.pos.join(',')));
                         if ([...transferred].some(pos => !ownKeys.has(pos))) throw new Error('不能委托自己施工范围以外的方块');
                     }
-                    const conflicting = Object.values(state.tasks).find(t => t.id !== parent?.id && t.runId === run.id && t.blueprintVersion === run.blueprintVersion && !terminal(t) && overlaps(selected, taskParts(run, t)));
+                    const conflicting = Object.values(state.tasks).find(t => t.id !== parent?.id && t.runId === run.id && t.blueprintVersion === run.blueprintVersion && !terminal(t) && !(t.kind === 'acceptance' && t.status === 'blocked') && overlaps(selected, taskParts(run, t)));
                     if (conflicting) throw new Error('施工范围已有未完成委托；' + conflictHint(conflicting));
                     if (Object.values(state.claims).some(c => (!parent || c.taskId !== parent.id) && c.runId === run.id && overlaps(selected, claimParts(state, c)))) throw new Error('请释放施工范围租约后再委托');
                     const task = { id: randomUUID(), key: idempotencyKey, signature, runId: run.id, blueprintVersion: run.blueprintVersion,
@@ -604,6 +646,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     return { leases, claims: Object.fromEntries([...leases.filter(c => c.owner !== name), ...leases.filter(c => c.owner === name)].map(c => [c.partId, c])) };
                 }
                 if (method === 'assert_write') {
+                    if (run?.designRevisionRequest) throw new Error('等待设计返修，施工已暂停');
                     requireRun();
                     if (!capabilities(run.spec, name).canBuild) throw new Error('缺少施工权限');
                     if (run.paused) throw new Error('团队工程已暂停');
@@ -628,7 +671,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                 }
                 if (method === 'task_result') {
                     const previous = state.tasks[args.taskId];
-                    if (previous?.runId === args.runId && previous.to === name && previous.finishedToken === args.token && previous.status === args.status) return { status: previous.status };
+                    if (previous?.runId === args.runId && previous.to === name && previous.finishedToken === args.token && previous.status === args.status) return { status: previous.status, ...(previous.acceptanceTaskId ? { acceptanceTaskId: previous.acceptanceTaskId } : {}) };
                     const task = requireTask();
                     if (!['completed', 'blocked', 'cancelled'].includes(args.status)) throw new Error('任务结果无效');
                     if (args.status === 'completed' && task.site && (!task.assignment || args.blueprintVersion !== task.blueprintVersion)) {
@@ -640,6 +683,10 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     task.status = args.status; task.summary = text(args.summary, '任务结果'); task.evidence = args.evidence ?? [];
                     task.finishedToken = task.token;
                     releaseTask(state, task); report(state, task, 'task_result');
+                    if (task.status === 'completed') {
+                        const acceptanceTaskId = handoffAcceptance(state, run, task);
+                        if (acceptanceTaskId) task.acceptanceTaskId = acceptanceTaskId;
+                    }
                     if (task.site && task.status === 'completed') {
                         // 独立蓝图：所有已委托的工地都完工即可汇总验收（不要求每个非入口成员都有工地）。
                         const sites = Object.values(state.tasks).filter(t => t.runId === run.id && t.site);
@@ -649,7 +696,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                             run.blueprintVersion++;
                         }
                     }
-                    return { status: task.status };
+                    return { status: task.status, ...(task.acceptanceTaskId ? { acceptanceTaskId: task.acceptanceTaskId } : {}) };
                 }
                 if (method === 'reassign') {
                     requireRun(); const task = state.tasks[args.taskId];
@@ -663,8 +710,15 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                         if (parent.to === args.recipient && !terminal(parent)) throw new Error('不能把协作任务派给正在等待它的上级任务执行者');
                         parent = parent.parentId && state.tasks[parent.parentId];
                     }
+                    if (task.kind === 'acceptance') {
+                        if (!isReadOnlyFinisher(run.spec, args.recipient)) throw new Error('验收任务只能重派给只读验收成员');
+                        task.dependsOn = Object.values(state.tasks).filter(candidate => candidate.runId === run.id &&
+                            candidate.blueprintVersion === run.blueprintVersion && candidate.kind !== 'acceptance' &&
+                            !['cancelled', 'superseded'].includes(candidate.status)).map(candidate => candidate.id);
+                    }
                     task.to = args.recipient; task.status = 'queued'; task.reason = null;
                     resetClaimWait(task);
+                    report(state, task, 'task_reassigned');
                     return { taskId: task.id, status: task.status, recipient: peerState(task.to) };
                 }
                 if (method === 'message') {
@@ -685,6 +739,7 @@ export function createTeamRuntime({ spec, path = ':memory:', now = Date.now, lea
                     requireRun();
                     // 全局验收权独立于入口：验收成员持有 finishGate 即可结束工程。
                     if (method === 'finish_run') {
+                        if(run.designRevisionRequest) throw new Error('等待设计返修，不能结束工程');
                         if (!capabilities(run.spec, name).finishGate) throw new Error('缺少全局验收权限，请由持有 finishGate 的验收成员执行 finish');
                     } else if (run.root !== name) throw new Error('只有协调者可以取消或失败整个工程');
                     const tasks = Object.values(state.tasks).filter(t => t.runId === run.id);

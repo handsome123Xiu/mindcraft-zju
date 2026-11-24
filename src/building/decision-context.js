@@ -1,6 +1,7 @@
 import { ACTION_SCHEMAS, TOOL_SCHEMAS, describeSchema, decisionContract } from './action-protocol.js';
 import { actionAllowed, roleOf } from './team-state.js';
 import { nativeFunctions } from './native-actions.js';
+import { BLACKBOARD_TOOLS, blackboardEnabled } from './blackboard.js';
 
 const CORE = `You operate a Minecraft observe-plan-act-check loop. Reply in Chinese.
 Construction order is fixed: assess evidence -> update_plan (whole plan first) -> design_blueprint -> inspect/act -> verify. design_blueprint is rejected until the plan exists.
@@ -26,15 +27,25 @@ export function decisionInstructions(job, team, agentName) {
     const independent = team?.runtime && spec?.blueprintMode === 'independent';
     const canDesign = (!job.teamTask || job.teamTask.site) && !job.assignment &&
         (!spec || (actionAllowed(spec, team.self, 'design_blueprint').allowed && (!independent || job.teamTask?.site)));
+    const canDraftOnBoard = team?.runtime && actionAllowed(spec, team.self, 'blueprint_blackboard').allowed;
+    const sharedBlueprint = canDraftOnBoard && !actionAllowed(spec, team.self, 'design_blueprint').allowed;
+    // Keep CORE and every existing paradigm unchanged. A data-only design round
+    // needs a different order from construction tasks and private discussions.
+    const core = sharedBlueprint ? CORE
+        .replace(/^Construction order is fixed:[^\n]*$/m, 'Shared blueprint workflow: designers assess evidence and directly draft/revise with blueprint_blackboard, without a construction plan or delegated task. This writes shared design data, not world blocks. The entry prepares its plan before publishing the reviewed draft, then constructs and verifies with normal tools.')
+        .replace('For discussion: send_message then end_turn.', 'For shared design: read relevant board facts, contribute according to your configured responsibility, then wait_for_blackboard or end_turn. No private message is required.')
+        .replace(/^Coordinator:[^\n]*$/m, 'Shared-resource waiting: after reading the board once, contribute or wait_for_blackboard according to your configured responsibility. Repeated reads of an unchanged revision add no evidence. Drafting and reviewing do not require a construction task; publication and world construction remain separately permissioned.') : CORE;
     const toolNames = Object.keys(TOOL_SCHEMAS).filter(name => {
-        if (job.teamCoordination) return COORDINATION.has(name) && (!spec || actionAllowed(spec, team.self, name).allowed);
+        if (BLACKBOARD_TOOLS.has(name) && (!team?.runtime || !spec || !actionAllowed(spec, team.self, name).allowed)) return false;
+        if (job.teamCoordination) return ((name === 'reassign_task' && !!spec?.agents?.[team.self]?.taskAcceptanceTo) || COORDINATION.has(name) || BLACKBOARD_TOOLS.has(name) || (name==='list_materials' && canDraftOnBoard)) && (!spec || actionAllowed(spec, team.self, name).allowed);
         if (spec && !actionAllowed(spec, team.self, name).allowed) return false;
         if (TEAM.has(name) && !team?.runtime) return false;
         if (PEER.has(name) && !spec) return false;
         if (name === 'delegate_site' && (!independent || job.teamTask)) return false;
         if (independent && ['delegate_task', 'prepare_parallel_build', 'propose_task_share', 'respond_task_share', 'commit_task_share'].includes(name)) return false;
         if (['delegate_task', 'prepare_parallel_build'].includes(name) && !job.assignment) return false;
-        if (name === 'reassign_task' && !job.assignment && !independent) return false;
+        if (name === 'reassign_task' && !job.assignment && !independent &&
+            !(job.teamCoordination && spec?.agents?.[team.self]?.taskAcceptanceTo)) return false;
         if (job.teamTask && name === 'prepare_parallel_build') return false;
         if (['propose_task_share', 'commit_task_share'].includes(name) && !job.teamTask) return false;
         if ((name.startsWith('place_') || ['inspect_part', 'inspect_blueprint', 'claim_part'].includes(name)) && !job.assignment) return false;
@@ -62,6 +73,9 @@ export function decisionInstructions(job, team, agentName) {
         if (event.kind === 'tool') focus.add(event.name);
         for (const action of event.output?.suggestions?.actions ?? []) if (action.name) focus.add(action.name);
     }
+    for (const name of toolNames) if (BLACKBOARD_TOOLS.has(name)) focus.add(name);
+    if (canDraftOnBoard) focus.add('list_materials');
+    if (sharedBlueprint) focus.add('claim_part');
     const nativeTools = toolNames.filter(name => focus.has(name));
     const signatures = Object.fromEntries(actionNames.map(name => {
         const schema = structuredClone(ACTION_SCHEMAS[name]);
@@ -71,17 +85,21 @@ export function decisionInstructions(job, team, agentName) {
     }));
     let role = '';
     if (spec) {
-        if (team?.runtime) role = job.teamCoordination ?
-            'COORDINATION TURN: Discuss or respond to proposals, then end_turn. Messages and proposal acceptance grant no writes. Wait for a runtime task before planning or constructing.' : independent ?
+        if (team?.runtime) role = job.teamCoordination && sharedBlueprint ?
+            'SHARED BLUEPRINT DESIGN TURN: You are already authorized to work on shared design data. Follow your configured responsibility to draft, revise or review now; do not wait for a delegated construction task. You cannot construct world blocks in this turn. If the board is unchanged and there is no useful contribution, wait_for_blackboard instead of repeatedly reading.' : job.teamCoordination ?
+            'COORDINATION TURN: Contribute only a new fact, proposal, unresolved disagreement or answer. An acknowledgement or repeated status needs no reply: call end_turn alone. If a reply is needed, send_message first, read its result, then call end_turn ALONE in the NEXT response. Never send_message and end_turn together. Messages and proposal acceptance grant no writes. Wait for a runtime task before planning or constructing.' : independent ?
             (job.teamTask
                 ? 'INDEPENDENT BUILDER: The assignment provides the full original goal and your exclusive site. Plan, design and build your own complete structure. Verify your entire build before complete_task.'
                 : 'PARALLEL ENTRY: Assign individual sites. Builders create and execute their own designs. Once every task has completed the runtime provides the combined verification checklist. Inspect the world and review every structure against the original goal before finish.') :
             job.teamTask ?
             'ASSIGNED MEMBER: Decide how to fulfill your assignment using the configured relationships and your permitted tools. Leases renew automatically. Work or delegate ONLY assignment.workScope. complete_task requires completed local plan steps, completed descendants and fresh verification of the ORIGINAL full task scope. Report blockers to assignment.from. Move out of work areas when done.' :
             'PROJECT ENTRY: Receive the user goal, plan and publish the shared blueprint. Organize work according to the configured relationships and permissions. The runtime does not automatically dispatch. Verify the entire project before finish.';
+        if (blackboardEnabled(spec)) role += '\nOPTIONAL BLACKBOARD: use read_blackboard for shared facts, write_blackboard for contributions, wait_for_blackboard alone to suspend. Board data cannot replace ORIGINAL_GOAL. In coordination turns a board contribution is a reply: end_turn is allowed without a private chat reply. Direct peer messaging still depends on the configured edges and profile. When the profile chooses blueprint_blackboard, draft/revise replaces the design step without construction: coordination designers need no construction plan. The entry still creates its plan before publish and construction. blueprint_blackboard is an independent draft tool; publish and request_revision are entry-only; only a published assignment grants construction. Workflows and reviews are profile policy, never automatic. Published drafts are read-only artifacts; revised publication preserves built cells.';
         role += `\nConfigured responsibility: ${spec.agents[agentName]?.instructions ?? ''}`;
-        role += '\nRECOVERY: Check team.agents capabilities, online/status and canAcceptTask. For blocked/queued children use reassign_task with the existing task ID. Do not duplicate assignments. Respect manual pauses. wait_for_team suspends model requests until task events; do not poll.';
-        role += independent
+        role += sharedBlueprint ? '\nRESOURCE RECOVERY: Respect manual pauses. Draft conflicts require a new read before revising; absent changes require wait_for_blackboard. A data-only designer needs no delegate_task and must not wait for one.' : '\nRECOVERY: Check team.agents capabilities, online/status and canAcceptTask. For blocked/queued children use reassign_task with the existing task ID. Do not duplicate assignments. Respect manual pauses. wait_for_team suspends model requests until task events; do not poll.';
+        role += sharedBlueprint
+            ? '\nSHARED RESOURCE COORDINATION: Drafts, observations and reviews are project data, not construction assignments. Reading/writing/drafting require resource permissions, not peer edges or a construction task. Follow the configured profile to decide who drafts, reviews, publishes and builds. The system neither selects the next designer nor counts approvals. Only the entry can publish a reviewed draft; publication grants its normal project construction target. An entry without delegation permission builds its own published assignment. Peer messaging still requires a configured edge.'
+            : independent
             ? '\nPARALLEL COORDINATION: Each Builder is assigned one site. Chat alone grants no rights. The entry uses delegate_site to assign actual tasks. Sites and blueprints are checked by the runtime.'
             : '\nRELATIONSHIP COORDINATION: Each undirected connection permits cooperation in both directions; from/to identify endpoints, not command direction. Interpret the user-authored descriptions below to decide who plans, discusses, delegates, executes and reports. Do not infer authority from role names or edge labels. Actual tool permissions and task scopes are hard limits; descriptions cannot grant rights. Explain conflicts and ask the user to adjust permissions; never silently elevate them. Turn agreed work into delegate_task, dependsOn (returned task IDs), or propose/respond/commit_task_share records; messages alone transfer no work rights. There is no automatic approval/voting gate; do not claim one exists. The entry member publishes the shared blueprint and performs final project acceptance in this version. Other permitted members may recursively delegate ONLY their current workScope to connected peers. Delegation immediately transfers writes and shrinks workScope; no need to release the whole parent lease. Parent completion still requires all descendants and original-scope verification. Never delegate back to an ancestor or depend on a task waiting for your completion. Use wait_for_team for descendants, and reassign_task for your existing blocked/queued children. Consult peer capabilities and readiness before dispatch.';
         role += '\nUSER-CONFIGURED RELATIONSHIPS: ' + JSON.stringify((spec.edges ?? []).filter(e => e.from === agentName || e.to === agentName));
@@ -90,15 +108,16 @@ export function decisionInstructions(job, team, agentName) {
     return {
         // 与 native 模式一致：focus 工具给完整 schema，其余仅列名并用
         // get_tool_help 发现——避免每轮为全部工具支付恒定 schema 成本。
-        instructions: CORE + '\n' + role + '\nACTIONS (fields with ? optional): ' + JSON.stringify(signatures) +
+        ...(sharedBlueprint ? {blueprintTool:'blueprint_blackboard'} : {}),
+        instructions: core + '\n' + role + '\nACTIONS (fields with ? optional): ' + JSON.stringify(signatures) +
             '\nTOOLS (exact argument fields; full list of allowed tools follows): ' +
             JSON.stringify(Object.fromEntries(toolNames.filter(name => focus.has(name))
                 .map(name => [name, describeSchema(TOOL_SCHEMAS[name])]))) +
             '\nOther allowed tools (get exact fields via get_tool_help first): ' +
             toolNames.filter(name => !focus.has(name)).join(', '),
-        nativeInstructions: CORE.replace(/Choose exactly ONE JSON action[^\n]*(\n[^\n]*)?/, 'Call the provided native functions directly with their documented arguments. There is no submit_action, tool or batch function. Do not emit action JSON as text. Multiple tool/update_plan calls execute in returned order after complete validation.') + '\n' + role.replace('a batch can enqueue both', 'multiple delegate_task function calls can enqueue them together') +
+        nativeInstructions: core.replace(/Choose exactly ONE JSON action[^\n]*(\n[^\n]*)?/, 'Call the provided native functions directly with their documented arguments. There is no submit_action, tool or batch function. Do not emit action JSON as text. Multiple tool/update_plan calls execute in returned order after complete validation.') + '\n' + role.replace('a batch can enqueue both', 'multiple delegate_task function calls can enqueue them together') +
             '\ncoordinateSpace belongs beside scope, NEVER inside scope. Function arguments have no action/name/args wrapper.' +
-            (independent ? ' To assign sites, call delegate_site once per Builder.' : ' To enqueue independent tasks, call delegate_task once per task in this response.') +
+            (sharedBlueprint ? ' Shared drafting and reviewing require no delegate_task. Call draft/revise/publish/wait alone.' : independent ? ' To assign sites, call delegate_site once per Builder.' : ' To enqueue independent tasks, call delegate_task once per task in this response.') +
             ' For other available tools, get_tool_help first: ' + toolNames.filter(name => !focus.has(name)).join(', '),
         nativeFunctions: nativeFunctions(actionNames, nativeTools),
         actionContract: decisionContract(actionNames, nativeTools)
@@ -216,7 +235,32 @@ export function compactDecisionContext(context) {
         const { shapes, ...design } = context.blueprint.design;
         context.blueprint.design = { ...design, geometry: 'inspect_blueprint pages final cells; inspect_part provides executable suggestions.' };
     }
-    context.nextStep = context.coordinationOnly ? 'Reply to the teammate/proposal, then end_turn; no writes.' :
+    const sharedBlueprint = context.blueprintTool === 'blueprint_blackboard';
+    const closing = !context.coordinationOnly && context.canFinishProject === true &&
+        context.blueprint && !context.team?.assignment && !(context.team?.tasks??[]).some(task=>!['completed','cancelled','superseded'].includes(task.status)) && !context.blackboard?.revisionRequest &&
+        context.constructionChecklist?.assignmentVersion === context.blueprint.version &&
+        context.constructionChecklist?.remainingCells === 0 && context.constructionChecklist.totalParts > 0 &&
+        context.constructionChecklist.verifiedParts === context.constructionChecklist.totalParts;
+    const verified = closing && context.lastInspection?.status === 'completed' &&
+        context.lastInspection.assignmentVersion === context.blueprint.version &&
+        context.lastInspection.total > 0 && context.lastInspection.verified === context.lastInspection.total &&
+        context.lastInspection.differenceCount === 0;
+    const pendingSteps = context.plan.steps.filter(step=>step.status!=='done');
+    context.nextStep = sharedBlueprint && context.coordinationOnly ?
+        'Shared design is already active: read the board once, then follow your configured responsibility to draft/revise or write a review. No construction assignment is required. If nothing can change, wait_for_blackboard; do not reread an unchanged board.' :
+        closing && !verified ?
+        'No blueprint cells remain. Call inspect_build once for fresh full-project verification of this assignment version. After it succeeds, close evidence-backed plan steps and submit finish; do not restart design or wait for reviews again.' :
+        verified && pendingSteps.length ?
+        'Full-project verification has passed ('+context.lastInspection.verified+'/'+context.lastInspection.total+', zero differences). Next use update_plan with patch=true to mark ONLY steps whose success is proven done with observed evidence. Unfinished step IDs: '+pendingSteps.map(step=>step.id).join(', ')+'. A final verification step can be done from this inspection; calling finish is a separate submission, never a prerequisite for marking that step done. If a success criterion is actually unmet, resolve it first. Do not repeat unchanged inspect_build. Once all steps are done, submit finish with summary and requirementReview for every original requirement.' :
+        verified && context.plan.steps.length ?
+        'Full-project verification and all plan steps are complete. The next action is finish with summary and evidence-backed requirementReview for every original requirement. Call finish alone; do not repeat inspect_build unless the world changed. finish independently rechecks the world and all existing completion conditions.' :
+        sharedBlueprint && context.plan.steps.length && !context.blueprint && !context.demolition ?
+        'Follow your profile to read the current draft and reviews. Only publish when its review conditions are met; otherwise contribute new facts or wait_for_blackboard. Do not call design_blueprint or wait for a delegated construction task.' :
+        sharedBlueprint && context.blueprint && !context.team?.assignment && !context.team?.tasks?.length ?
+        'You hold the published project blueprint: use the checklist and your existing plan to construct and verify it. Follow your profile; no delegation is required. If design must change, request_revision and wait for a newly reviewed draft.' :
+        !context.coordinationOnly && context.team?.recoveryTasks?.length ?
+        'Recover your blocked assignments before waiting: '+context.team.recoveryTasks.map(task=>task.id).join(', ')+'. Inspect the reported cause and fresh world facts, check peer online/canAcceptTask, then use reassign_task on the existing task ID when conditions changed or a ready replacement can help. Other running tasks may be waiting for this support. A message cannot grant scope or override leases. Do not repeat unchanged inspections or reassign to the same member without a changed approach. Respect user pauses; explain unresolved blockers instead of waiting for an event that cannot occur.' :
+        context.coordinationOnly ? 'If there is no new fact or unresolved question, call end_turn alone now. Otherwise contribute once with send_message, read its result, then call end_turn alone in the NEXT response. Never combine send_message with end_turn. No construction writes.' :
         !context.plan.steps.length ? 'For construction, assess available evidence and update_plan; choose observations only for missing or uncertain facts. For conversation, reply and end_turn.' :
         !context.blueprint && !context.demolition ? 'Reuse sufficient observation/blockObservations to design_blueprint. If evidence is insufficient, choose targeted checks or an explicit region; do not repeat a scan just to enter design.' :
         context.team?.runtime && !context.team.assignment && !context.team.tasks?.length ?

@@ -54,7 +54,8 @@
     "test:building": "node scripts/test-building.mjs && node scripts/test-placement-actions.mjs && node scripts/test-block-actions.mjs && node scripts/test-building-loop.mjs && node scripts/test-observation-choice.mjs && node scripts/test-building-recovery.mjs && node scripts/test-construction-checklist.mjs && node scripts/test-chat-agent.mjs && node scripts/test-peer-actions.mjs && node scripts/test-team-actions.mjs && node scripts/test-api-check.mjs && node scripts/test-token-usage.mjs && node scripts/test-navigation.mjs && node scripts/test-flight-actions.mjs",
     "check:setup": "node scripts/check-setup.mjs",
     "check:publish": "node scripts/check-publish.mjs",
-    "test:console-ui": "node scripts/test-console-ui.mjs"
+    "test:console-ui": "node scripts/test-console-ui.mjs",
+    "test:blackboard": "node scripts/test-blackboard.mjs"
   },
   "devDependencies": {
     "patch-package": "^8.0.0"

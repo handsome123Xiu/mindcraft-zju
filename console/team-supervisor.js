@@ -58,8 +58,8 @@ export function createTeamSupervisor({ root, log = () => {}, launch = spawn }) {
                 }
                 const previous = runtime.snapshot().runs.filter(run => run.status === 'active').at(-1);
                 if (previous) {
-                    const topology = value => JSON.stringify({ entry: entryAgent(value), coordination: value.coordination, blueprintMode: value.blueprintMode,
-                        agents: Object.entries(value.agents).map(([name, node]) => [name, node.role, JSON.stringify(node.permissions ?? null), node.instructions ?? '', node.taskReportTo ?? null, node.taskAfter ?? null]).sort(),
+                    const topology = value => JSON.stringify({ entry: entryAgent(value), coordination: value.coordination, blueprintMode: value.blueprintMode, modules: value.modules,
+                        agents: Object.entries(value.agents).map(([name, node]) => [name, node.role, JSON.stringify(node.permissions ?? null), node.instructions ?? '', node.taskReportTo ?? null, node.taskAfter ?? null, node.taskAcceptanceTo ?? null]).sort(),
                         edges: (value.edges ?? []).map(edge => JSON.stringify([[edge.from, edge.to].sort(), edge.description ?? '', edge.label ?? '', edge.note ?? ''])).sort() });
                     if (topology(previous.spec) !== topology(spec)) throw new Error('恢复旧工程需要原成员和连线；如需使用新结构，请选择“保存并开始新测试”');
                 }

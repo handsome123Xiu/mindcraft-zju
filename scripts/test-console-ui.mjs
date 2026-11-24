@@ -17,7 +17,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const out = await mkdtemp(join(tmpdir(), 'mindcraft-ui-shots-'));
 const profile = await mkdtemp(join(tmpdir(), 'mindcraft-ui-browser-'));
 const browserBin = process.env.BROWSER_BIN ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-let saved = null;
+let saved = null, boardFixture = null;
 const server = createServer(async (req, res) => {
     try {
         const requestUrl = new URL(req.url, 'http://localhost');
@@ -39,7 +39,7 @@ const server = createServer(async (req, res) => {
             const names = requestUrl.searchParams.getAll('name');
             value = { spec: TEAM_PRESETS[path.split('/').at(-1)](names.length ? names : undefined) };
         }
-        if (path === '/api/team/runtime') value = { running: false, agents: [], tasks: [], proposals: [], claims: {}, runs: [] };
+        if (path === '/api/team/runtime') value = boardFixture ?? { running: false, agents: [], tasks: [], proposals: [], claims: {}, runs: [] };
         if (path === '/api/team') {
             if (req.method === 'POST') {
                 const reconciled = preserveTaskDependencies(data.spec, saved);
@@ -110,8 +110,8 @@ try {
     const modes = ['pipeline', 'centralized', 'router', 'competitive', 'parallel',
         'voting', 'peers', 'handoff', 'blackboard', 'swarm'];
     assert.deepEqual(await evaluate("[...document.querySelectorAll('[data-preset]')].map(button => button.dataset.preset)"), modes);
-    const edgesByMode = { pipeline: 3, centralized: 3, router: 4, competitive: 2, parallel: 3,
-        voting: 7, peers: 3, handoff: 6, blackboard: 3, swarm: 6 };
+    const edgesByMode = { pipeline: 2, centralized: 3, router: 4, competitive: 2, parallel: 3,
+        voting: 7, peers: 3, handoff: 6, blackboard: 0, swarm: 6 };
     for (const mode of [...modes.filter(mode => mode !== 'centralized'), 'centralized']) {
         saved = null;
         await call('Page.navigate', { url });
@@ -126,6 +126,7 @@ try {
         assert(validateTeamSpec(preset).ok, `${mode} must create a valid team on an empty canvas`);
         assert.deepEqual(Object.keys(preset.agents), names);
         assert.equal(preset.blueprintMode, template.blueprintMode);
+        assert.deepEqual(preset.modules, template.modules);
         assert.deepEqual(preset.edges, template.edges, `${mode} has its own topology`);
         assert.equal(preset.edges.length, edgesByMode[mode]);
         for (const name of names) {
@@ -144,9 +145,35 @@ try {
         await call('Page.reload');
         await until(() => evaluate(`document.querySelectorAll('#teamCanvas g').length === ${memberCount}`), 'Saved preset did not survive reload');
         const restored = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
+        assert.deepEqual(restored.modules, template.modules);
+        if(mode==='blackboard') {
+            assert.equal(await evaluate("document.querySelector('#blackboardEnabled').checked"),true);
+            assert(await evaluate("!!document.querySelector('#teamCanvas [data-resource=blackboard]')"));
+            // Editing a normal capability must preserve explicitly opted-in tools
+            // even for the Builder's wildcard permission configuration.
+            await evaluate("document.querySelector('#capFinish').dispatchEvent(new Event('change'))");
+            const edited=await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
+            for(const tool of ['read_blackboard','write_blackboard','wait_for_blackboard','blueprint_blackboard']) {
+                assert(edited.agents.builder.permissions.allow.includes(tool), 'permission editor retains '+tool);
+                assert(!edited.agents.builder.permissions.deny.includes(tool));
+            }
+            boardFixture={running:false,agents:[],tasks:[],proposals:[],claims:{},runs:[{id:'ui-blackboard',status:'active',spec:template,
+                blueprintDrafts:{latest:'ui-draft',items:{'ui-draft':{id:'ui-draft',author:'designer1',summary:'两格平台',shapes:[{kind:'point',at:[0,0,0],block:'stone'}]}}},
+                blackboard:{revision:1,entries:{review:{key:'review/ui-draft/designer1',author:'designer1',revision:1,content:'approve=true <script>text only</script>'}}}}]};
+            await until(()=>evaluate("document.querySelector('#blackboardEntries').textContent.includes('当前草稿 ui-draft')"),'shared draft did not appear');
+            assert.equal(await evaluate("document.querySelector('#blackboardEntries script')"),null,'board content is plain text');
+            await evaluate("document.querySelector('#blackboardEntries details').open=true");
+            await delay(2100);
+            assert(await evaluate("document.querySelector('#blackboardEntries details').open"),'polling preserves expanded draft');
+            boardFixture.runs[0].blackboard.revision++;
+            await until(()=>evaluate("document.querySelector('#blackboardRuntimeStatus').textContent.includes('黑板 v2')"),'shared board did not refresh');
+            assert(await evaluate("document.querySelector('#blackboardEntries details').open"),'updates preserve expanded draft');
+            boardFixture=null;
+        }
         for (const name of names) {
             assert.equal(restored.agents[name].taskReportTo, template.agents[name].taskReportTo);
             assert.equal(restored.agents[name].taskAfter, template.agents[name].taskAfter);
+            assert.equal(restored.agents[name].taskAcceptanceTo, template.agents[name].taskAcceptanceTo);
         }
         if (mode === 'pipeline') {
             // Simulate an already-open old page dropping newly introduced fields.
@@ -161,12 +188,13 @@ try {
                 const first = await fetch('/api/team', {method:'POST', body:JSON.stringify({spec:template.spec})});
                 if (!first.ok) throw new Error('preset save failed');
                 const old = template.spec;
-                for (const node of Object.values(old.agents)) delete node.taskAfter;
+                for (const node of Object.values(old.agents)) { delete node.taskAfter; delete node.taskAcceptanceTo; }
                 const response = await fetch('/api/team', {method:'POST', body:JSON.stringify({spec:old})});
                 if (!response.ok) throw new Error('old-page save failed');
             })()`);
             assert.equal(saved.agents.builder2.taskAfter, 'builder1');
             assert.equal(saved.agents.acceptor.taskAfter, 'builder2');
+            assert.equal(saved.agents.builder2.taskAcceptanceTo, 'acceptor');
             await call('Page.reload');
             await until(() => evaluate("!!document.querySelector('#teamEditor')?.value && JSON.parse(document.querySelector('#teamEditor').value).agents.acceptor?.taskAfter === 'builder2'"), 'Old-page save erased stage dependencies');
             await evaluate("(() => { const editor = document.querySelector('#teamEditor'); const spec = JSON.parse(editor.value); spec.agents.acceptor.taskAfter = null; editor.value = JSON.stringify(spec); editor.dispatchEvent(new Event('blur')); document.querySelector('#teamEntry').dispatchEvent(new Event('change')); })()");
@@ -206,7 +234,10 @@ try {
     const configuredSpec = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
     // 预设切换 = 完整模板替换画布（曾经的 useExisting 沿用旧成员，画布看起来没反应）。
     await click('[data-preset=blackboard]');
-    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.finisher?.role === 'finisher'"), 'Blackboard must replace the canvas with its own members');
+    await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.designer5?.role === 'board_designer'"), 'Blackboard must replace the canvas with its own members');
+    assert.equal(await evaluate("document.querySelector('#blackboardEnabled').checked"),true);
+    await evaluate("document.querySelector('#blackboardEnabled').checked=false; document.querySelector('#blackboardEnabled').dispatchEvent(new Event('change'));");
+    assert.equal(await evaluate("JSON.parse(document.querySelector('#teamEditor').value).modules.blackboard.enabled"),false);
     await evaluate(`document.querySelector('#teamEditor').value = ${JSON.stringify(JSON.stringify(configuredSpec))}; document.querySelector('#teamEditor').onblur()`);
     await click('[data-preset=peers]');
     await until(() => evaluate("Object.keys(JSON.parse(document.querySelector('#teamEditor').value).agents).join() === 'arch_1,arch_2,arch_3'"), 'Peers preset must replace the canvas with arch members');
@@ -215,6 +246,7 @@ try {
     await until(() => evaluate("JSON.parse(document.querySelector('#teamEditor').value).agents.builder3?.role === 'module_builder'"), 'Parallel must replace the canvas with independent modules');
     const rewired = await evaluate("JSON.parse(document.querySelector('#teamEditor').value)");
     assert(rewired.edges.length === 3, 'parallel preset has three independent spokes');
+    assert.equal(rewired.modules,undefined,'preset replacement clears the optional resource');
     assert.deepEqual(Object.keys(rewired.agents), ['lead', 'builder1', 'builder2', 'builder3']);
     await click('[data-tab=control]'); await screenshot('console-control-desktop.png');
     await click('[data-tab=teamTab]');
@@ -237,6 +269,7 @@ try {
             });
         })()`);
         assert(fits, mode + ' nodes fit inside the mobile canvas');
+        if(mode==='blackboard') await screenshot('preset-blackboard-mobile.png');
     }
     await screenshot('console-team-mobile.png');
     const mobile = await evaluate('({width:innerWidth,scroll:document.documentElement.scrollWidth})');

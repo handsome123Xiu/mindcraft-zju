@@ -10,9 +10,10 @@ import { createProgressTracker, failureFingerprint } from './progress.js';
 
 import { checklistParts } from './checklist.js';
 import { decisionInstructions, recentModelEvents, compactDecisionContext, actionStats } from './decision-context.js';
-import { roleOf } from './team-state.js';
+import { roleOf, actionAllowed } from './team-state.js';
 import { scopeSummary, taskScope } from './task-scope.js';
 import { markObservationsStale } from './observation-memory.js';
+import { createBlackboardBlueprintDesigner } from './blueprint-blackboard.js';
 
 class LoopLimitError extends Error {}
 class InputChangedError extends Error {}
@@ -21,10 +22,28 @@ class InputChangedError extends Error {}
 // hint and field/expected diagnostics reach the model; plain Errors only retry blindly.
 const planError = (field, message, expected) => protocolError(field, message, expected, 'INVALID_PLAN');
 
+function dispatchedBlockers(job, team) {
+    if (!team?.runtime || job.teamTask || job.teamCoordination || job.teamPaused || job.teamContext?.paused) return [];
+    return (job.teamContext?.tasks ?? []).filter(task=>task.status==='blocked' && task.from===team.self);
+}
+
+// Lease renewals and chat acknowledgements are not recovery progress.
+function recoveryTaskState(job) {
+    return JSON.stringify((job.teamContext?.tasks ?? []).map(task =>
+        [task.id, task.status, task.attempt, task.to, task.dependsOn, !!task.claimStalled]
+    ).sort((a,b) => a[0].localeCompare(b[0])));
+}
+
+function waitForRecovery(job, reason) {
+    return { status: 'waiting_user', reason, teamRecovery: { taskState: recoveryTaskState(job) } };
+}
+
 export function createDecisionRequest(job, world, budget, agentName = 'builder', team = null) {
     const context = {
         ORIGINAL_GOAL: job.request, agentName, owner: job.owner, messages: job.messages,
         userClarifications: job.clarifications ?? [],
+        ...(job.teamContext?.blackboard ? {blackboard:{...job.teamContext.blackboard,
+            readProgress:Object.fromEntries(Object.entries(job.blackboardDraftReads??{}).map(([id,read])=>[id,{readShapes:read.indices.length,shapeCount:read.shapeCount,complete:read.indices.length===read.shapeCount}]))}} : {}),
         TEAM_GOAL: job.teamGoal ?? null,
         coordinationOnly: job.teamCoordination ?? false,
         planProtocol: { existingRequirements: 'read-only; omit requirements when updating steps', progress: 'steps[].status and steps[].evidence' },
@@ -74,6 +93,12 @@ export function createDecisionRequest(job, world, budget, agentName = 'builder',
         recentEvents: recentModelEvents(job.events), budget
     };
     const protocol = decisionInstructions(job, team, agentName);
+    const blockers = dispatchedBlockers(job,team);
+    if (context.team && blockers.length) context.team.recoveryTasks = blockers.map(task=>({id:task.id,to:task.to,partIds:task.partIds,reason:task.reason??task.summary}));
+    if (protocol.blueprintTool) {
+        context.blueprintTool = protocol.blueprintTool;
+    }
+    if (team?.runtime) context.canFinishProject = roleOf(team.spec(),team.self).finishGate === true;
     const { context: compact, metrics } = compactDecisionContext(context);
     return { turns: [{ role: 'user', content: JSON.stringify(compact) }], ...protocol,
         contextMetrics: { ...metrics, instructionsChars: protocol.instructions.length,
@@ -283,7 +308,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
             if (team?.runtime && !job.teamRunId) await team.openRun(job);
             if (team?.runtime && !job.teamTask && !job.teamCoordination) await team.resume(job);
             job.supportedMaterials = world.supportedMaterials?.() ?? MATERIALS;
-            tools = createBuildingTools({ world, job, design: createBlueprintSkill(countedModel), checkpoint, sendMessage, peers, team,
+            tools = createBuildingTools({ world, job, design: createBlueprintSkill(countedModel), blackboardDesign: createBlackboardBlueprintDesigner(countedModel), checkpoint, sendMessage, peers, team,
                 onProgress: info => report('progress', info) });
             job.status = 'thinking';
             // The model chooses whether and where to observe from the task and
@@ -323,6 +348,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                     signal.throwIfAborted();
                     action = parseAction(text);
                     if (job.teamCoordination && !['tool', 'batch', 'end_turn', 'blocked'].includes(action.action)) throw new Error('当前仅为队友协调回合：观察、让路、回复后 end_turn，不能修改施工任务');
+                    if(action.action==='batch' && action.steps.some(step=>step.name==='wait_for_blackboard')) throw new Error('wait_for_blackboard 必须单独调用');
                     // Persist the proposed action before invoking anything with side effects.
                     record('decision', action.action, action, { status: 'selected' });
                     await checkpoint();
@@ -334,6 +360,10 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                             ({ observe_environment: 'observing', observe_cells: 'observing', inspect_block: 'observing', look_at: 'looking',
                                 inspect_build: 'verifying', move_to: 'moving', fly_to: 'flying', land_at: 'landing', dig_block: 'demolishing' })[action.name] ?? 'thinking';
                         output = await tools.call(action.name, action.args, signal);
+                        if(action.name==='wait_for_blackboard' && output.status==='waiting_blackboard') {
+                            session.waitRevision=teamRevision;
+                            result={status:'waiting_team',reason:'等待共享黑板更新'};
+                        }
                     }
                     if (action.action === 'batch') {
                         // A batch is sequential tool steps under the same budget and
@@ -397,7 +427,11 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                                 session.waitTimeout.unref?.();
                             }
                         }
-                        if (!job.teamTask && !coordinatorHasWork()) {
+                        const recovery = dispatchedBlockers(job,team);
+                        if (!job.teamTask && recovery.length) {
+                            output = {status:'recovery_required',taskIds:recovery.map(task=>task.id),
+                                message:'你派出的任务仍 blocked，其他 running 成员可能也在等它提供支撑。请核对当前事实和成员状态，用 reassign_task 恢复原任务；消息不能改变 scope。若条件确实无法解除，向用户说明，不要继续等待同一事件。'};
+                        } else if (!job.teamTask && !coordinatorHasWork()) {
                             // "没有可执行任务"可能是运行时接管尚未完成（进程退出
                             // 检测、重派与 sweep 都是秒级粒度）。转等待事件而非立刻
                             // 报错：重派/结束事件会推进 revision 并唤醒。
@@ -496,6 +530,20 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                 if (!result && invalidDecisions >= 3) result = { status: 'paused',
                     reason: '模型连续三次返回不符合当前函数或动作协议的调用，已保存进度及 response 原始响应日志。可发送“继续”重试' };
                 const progress = trackProgress(action, output);
+                const recovery = dispatchedBlockers(job,team);
+                if (!result && progress.idle>=3 && recovery.length) {
+                    result = coordinatorHasWork()
+                        ? waitForWorkers('仍有成员执行或可领取任务；保留阻塞任务，等待实际任务变化后继续恢复')
+                        : waitForRecovery(job, '直接委托仍阻塞且连续决策没有执行恢复：'+recovery.map(task=>task.id.slice(0,8)).join('、')+'。现场与工程保留；请改变移动/支撑条件或恢复原任务。真实任务状态变化会重新触发恢复，重复聊天不会。');
+                }
+                // Waiting for a shared revision is not project failure. Only
+                // throttle entry polling; designers still make their own review.
+                if(!result && progress.idle>=3 && !job.teamCoordination && !job.teamTask && job.teamContext?.blackboard &&
+                    action?.name==='read_blackboard' && output?.status==='observed' &&
+                    actionAllowed(team.spec(),team.self,'blueprint_blackboard').allowed && !actionAllowed(team.spec(),team.self,'design_blueprint').allowed) {
+                    if((job.teamEventRevision??0)!==teamRevision)continue;
+                    result=waitForWorkers('黑板版本未变化；已停止重复查询，等待共享设计更新，工程保留');
+                }
                 // A coordinator's repeated reads do not mean its workers have
                 // failed. Stop spending model calls and await task events.
                 if (!result && progress.idle >= 3 && coordinatorHasWork()) {
@@ -518,6 +566,8 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
             }
             if (!session.stop && reason instanceof LoopLimitError && coordinatorHasWork()) {
                 result = waitForWorkers('协调者本轮预算已用完，子任务继续执行；等待团队事件后恢复协调');
+            } else if (!session.stop && reason instanceof LoopLimitError && dispatchedBlockers(job,team).length) {
+                result = waitForRecovery(job, '本轮预算已用完，仍有直接委托 blocked；工程和现场保留，真实任务状态变化后可恢复。');
             }
         } finally {
             session.finishing = true;
@@ -593,7 +643,7 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
             if (coordination) {
                 job.teamRunId = coordination.runId; job.teamCoordination = true; job.teamGoal = coordination.payload.context.request;
                 job.teamEvents = [coordination.id];
-                job.messages = [{ role: 'user', from: coordination.from, content: coordination.payload.text, at: new Date().toISOString() }];
+                job.messages = [{ role: 'user', from: coordination.kind==='blackboard_update'?owner:coordination.from, content: coordination.kind==='blackboard_update'?request:coordination.payload.text, at: new Date().toISOString() }];
             }
             return run();
         },
@@ -606,6 +656,12 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
         async receiveTeamEvent(event) {
             if (active?.finishing) await active.done;
             if (job?.teamEvents?.includes(event.id)) return true;
+            if(event.kind==='blackboard_update' && event.payload.context && (controller.canAcceptTask() ||
+                (!active && job?.teamCoordination && job.status==='waiting_team' && !job.teamPaused && job.teamRunId!==event.runId))) {
+                const context=event.payload.context;
+                controller.start({request:context.request,owner:context.owner,origin:context.origin,dimension:context.dimension,originLocked:true,coordination:event}).catch(error=>report('team_error',{reason:error.message}));
+                await checkpoint(); return true;
+            }
             if (['message', 'share_proposal'].includes(event.kind) && event.payload.context && controller.canAcceptTask()) {
                 const context = event.payload.context;
                 controller.start({ request: '处理队友协调请求：' + event.payload.text.slice(0, 900),
@@ -646,10 +702,32 @@ export function createBuildingLoop({ world, model, save, sendMessage, peers = nu
                 }
                 return true;
             }
+            const resumeRecovery = async () => {
+                if (active || job.teamRunId !== event.runId || job.status !== 'waiting_user' ||
+                    !job.result?.teamRecovery || job.result.stopRequested || job.teamPaused || job.teamContext?.paused ||
+                    !event.kind.startsWith('task_')) return;
+                try {
+                    await team.refresh(job);
+                    if (!active && job.teamRunId === event.runId && job.status === 'waiting_user' &&
+                        job.result?.teamRecovery && !job.result.stopRequested && !job.teamPaused && !job.teamContext?.paused &&
+                        recoveryTaskState(job) !== job.result.teamRecovery.taskState) {
+                        run().catch(error => report('team_error', { reason: error.message }));
+                        return true;
+                    }
+                } catch (error) { report('team_error', { reason: error.message }); }
+            };
+            if (await resumeRecovery()) return true;
             if (!active && job.status === 'waiting_team') run().catch(error => report('team_error', { reason: error.message }));
             else if (active) {
                 const session = active;
-                session.done.then(() => { if (!active && job.status === 'waiting_team') run().catch(error => report('team_error', { reason: error.message })); });
+                session.done.then(async () => {
+                    if (await resumeRecovery()) return;
+                    if (!active && job.status === 'waiting_team') run().catch(error => report('team_error', { reason: error.message }));
+                    else if(event.kind==='blackboard_update' && controller.canAcceptTask() && (job.blackboardSeenRevision??-1)<event.payload.revision) {
+                        const c=event.payload.context;
+                        controller.start({request:c.request,owner:c.owner,origin:c.origin,dimension:c.dimension,originLocked:true,coordination:event}).catch(error=>report('team_error',{reason:error.message}));
+                    }
+                });
             }
             return true;
         },
